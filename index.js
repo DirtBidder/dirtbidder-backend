@@ -98,6 +98,33 @@ app.get('/api/admin/summary', authMiddleware, ownerOnly, async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('DirtBidder backend is running'));
+async function runMigrations() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS escrow_transactions (
+        id SERIAL PRIMARY KEY,
+        job_id INTEGER NOT NULL REFERENCES jobs(id),
+        amount DECIMAL(12,2) NOT NULL,
+        status VARCHAR(50) DEFAULT 'held',
+        stripe_payment_intent_id VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS reviews (
+        id SERIAL PRIMARY KEY,
+        job_id INTEGER NOT NULL REFERENCES jobs(id),
+        reviewer_id INTEGER NOT NULL REFERENCES users(id),
+        reviewee_id INTEGER NOT NULL REFERENCES users(id),
+        rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+        comment TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('Migrations complete');
+  } catch (err) {
+    console.error('Migration error:', err);
+  }
+}
+runMigrations();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
