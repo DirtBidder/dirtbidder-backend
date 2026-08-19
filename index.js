@@ -78,6 +78,13 @@ function ownerOnly(req, res, next) {
   if (req.user.role !== 'owner') return res.status(403).json({ error: 'Owner access only' });
   next();
 }
+const jobsRoutes = require('./routes/jobs');
+const bidsRoutes = require('./routes/bids');
+const dashboardRoutes = require('./routes/dashboard');
+
+app.use('/api/jobs', jobsRoutes(pool, authMiddleware));
+app.use('/api/bids', bidsRoutes(pool, authMiddleware));
+app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
 
 // Owner dashboard data
 app.get('/api/admin/summary', authMiddleware, ownerOnly, async (req, res) => {
