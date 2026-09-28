@@ -99,6 +99,7 @@ app.use('/api/jobs', jobsRoutes(pool, authMiddleware));
 app.use('/api/bids', bidsRoutes(pool, authMiddleware));
 app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
 app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
+app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
 app.get('/api/photos/:token', async (req, res) => {
@@ -191,6 +192,9 @@ async function runMigrations() {
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS operator_payout DECIMAL(12,2)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS stripe_session_id VARCHAR(255)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS released_at TIMESTAMP",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS stripe_transfer_id VARCHAR(255)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS paid_out_at TIMESTAMP",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_account_id VARCHAR(255)",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS est_days INTEGER",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT"
     ];

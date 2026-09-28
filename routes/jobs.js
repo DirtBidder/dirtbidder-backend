@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { payPendingPayouts } = require('../lib/payouts');
 
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
 const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
@@ -138,10 +139,11 @@ module.exports = (pool, authMiddleware) => {
       if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
       if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       if (!['in_progress', 'awaiting_release'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is not ready for release' });
-      // Payout to the operator's bank happens once operator payout accounts (Stripe Connect) are set up;
-      // until then the release is recorded here and paid out from DirtBidder's Stripe balance.
       await pool.query("UPDATE escrow_transactions SET status = 'released', released_at = NOW() WHERE job_id = $1 AND status = 'held'", [req.params.id]);
       await pool.query("UPDATE jobs SET status = 'completed', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1", [req.params.id]);
+      // Send the operator's share to their bank now if their payout account is set up; otherwise it waits until it is
+      const op = await pool.query("SELECT operator_id FROM bids WHERE job_id = $1 AND status = 'accepted' LIMIT 1", [req.params.id]);
+      if (op.rows[0]) await payPendingPayouts(pool, op.rows[0].operator_id);
       res.json({ status: 'completed' });
     } catch (err) {
       console.error(err);

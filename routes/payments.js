@@ -49,7 +49,8 @@ module.exports = (pool, authMiddleware) => {
     try {
       const result = await pool.query(
         `SELECT e.id, e.job_id, e.amount, e.client_fee, e.operator_fee, e.client_total, e.operator_payout,
-                e.status, e.created_at, e.released_at, j.title AS job_title, j.status AS job_status
+                e.status, e.created_at, e.released_at, e.paid_out_at, (e.stripe_transfer_id IS NOT NULL) AS paid_out,
+                j.title AS job_title, j.status AS job_status
          FROM escrow_transactions e
          JOIN jobs j ON j.id = e.job_id
          LEFT JOIN bids b ON b.id = e.bid_id
