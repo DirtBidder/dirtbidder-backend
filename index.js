@@ -147,6 +147,11 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // Hide any jobs posted by test accounts from operators
+    const hidden = await pool.query(
+      "UPDATE jobs SET status = 'test' WHERE status = 'open' AND client_id IN (SELECT id FROM users WHERE email ILIKE '%+test%')"
+    );
+    console.log('Test jobs hidden:', hidden.rowCount);
     const cols = await pool.query(
       "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name IN ('jobs','bids') ORDER BY table_name, ordinal_position"
     );

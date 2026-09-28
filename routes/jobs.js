@@ -8,10 +8,13 @@ module.exports = (pool, authMiddleware) => {
       const { title, description, location, job_type, acreage, timeline, budget } = req.body;
       if (!title) return res.status(400).json({ error: 'Title is required' });
 
+      // Jobs from test accounts (emails containing "+test") are hidden from operators
+      const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+      const isTest = u.rows[0] && /\+test/i.test(u.rows[0].email || '');
       const result = await pool.query(
-        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [req.user.id, title, description, location, job_type, acreage, timeline, budget]
+        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [req.user.id, title, description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open']
       );
       res.json(result.rows[0]);
     } catch (err) {
