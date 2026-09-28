@@ -20,16 +20,43 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
-  // Accept a bid (client only)
+  // Accept a bid (only the client who posted the job)
   router.post('/:id/accept', authMiddleware, async (req, res) => {
     try {
-      const bidResult = await pool.query('SELECT * FROM bids WHERE id = $1', [req.params.id]);
-      if (bidResult.rows.length === 0) return res.status(404).json({ error: 'Bid not found' });
+      const r = await pool.query(
+        `SELECT b.*, j.client_id, j.status AS job_status
+         FROM bids b JOIN jobs j ON j.id = b.job_id WHERE b.id = $1`,
+        [req.params.id]
+      );
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Bid not found' });
+      const bid = r.rows[0];
+      if (bid.client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['open', 'test'].includes(bid.job_status)) return res.status(400).json({ error: 'This job already has a hired operator' });
+      if (bid.status !== 'pending') return res.status(400).json({ error: 'This bid is no longer available' });
 
-      await pool.query("UPDATE bids SET status = 'accepted' WHERE id = $1", [req.params.id]);
-      await pool.query("UPDATE jobs SET status = 'in_progress' WHERE id = $1", [bidResult.rows[0].job_id]);
+      await pool.query("UPDATE bids SET status = 'accepted' WHERE id = $1", [bid.id]);
+      await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND id <> $2 AND status = 'pending'", [bid.job_id, bid.id]);
+      await pool.query("UPDATE jobs SET status = 'in_progress' WHERE id = $1", [bid.job_id]);
 
       res.json({ message: 'Bid accepted' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Decline a bid (only the client who posted the job)
+  router.post('/:id/decline', authMiddleware, async (req, res) => {
+    try {
+      const r = await pool.query(
+        'SELECT b.status, j.client_id FROM bids b JOIN jobs j ON j.id = b.job_id WHERE b.id = $1',
+        [req.params.id]
+      );
+      if (r.rows.length === 0) return res.status(404).json({ error: 'Bid not found' });
+      if (r.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (r.rows[0].status !== 'pending') return res.status(400).json({ error: 'This bid is no longer pending' });
+      await pool.query("UPDATE bids SET status = 'declined' WHERE id = $1", [req.params.id]);
+      res.json({ message: 'Bid declined' });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });

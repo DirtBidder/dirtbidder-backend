@@ -28,10 +28,43 @@ module.exports = (pool, authMiddleware) => {
     try {
       let result;
       if (req.user.role === 'client') {
-        result = await pool.query('SELECT * FROM jobs WHERE client_id = $1 ORDER BY created_at DESC', [req.user.id]);
+        // Include bid counts and the hired operator so the client dashboard can show real data
+        result = await pool.query(
+          `SELECT j.*,
+             (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
+             (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id AND b.status = 'pending')::int AS pending_bid_count,
+             ab.amount AS accepted_amount,
+             ou.name AS hired_operator_name
+           FROM jobs j
+           LEFT JOIN bids ab ON ab.job_id = j.id AND ab.status = 'accepted'
+           LEFT JOIN users ou ON ou.id = ab.operator_id
+           WHERE j.client_id = $1
+           ORDER BY j.created_at DESC`,
+          [req.user.id]
+        );
       } else {
         result = await pool.query("SELECT * FROM jobs WHERE status = 'open' ORDER BY created_at DESC");
       }
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Bids on a job (only the client who posted it can see them)
+  router.get('/:id/bids', authMiddleware, async (req, res) => {
+    try {
+      const job = await pool.query('SELECT client_id FROM jobs WHERE id = $1', [req.params.id]);
+      if (job.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (job.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      const result = await pool.query(
+        `SELECT b.id, b.job_id, b.amount, b.message, b.status, b.created_at,
+                u.name AS operator_name
+         FROM bids b LEFT JOIN users u ON u.id = b.operator_id
+         WHERE b.job_id = $1 ORDER BY b.created_at DESC`,
+        [req.params.id]
+      );
       res.json(result.rows);
     } catch (err) {
       console.error(err);
