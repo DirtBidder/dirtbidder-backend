@@ -11,13 +11,19 @@ module.exports = (pool, authMiddleware) => {
       if (!amt || amt <= 0) return res.status(400).json({ error: 'Enter a bid amount' });
       const days = est_days ? parseInt(est_days, 10) : null;
 
-      const job = await pool.query('SELECT client_id, status FROM jobs WHERE id = $1', [req.params.jobId]);
+      const job = await pool.query(
+        'SELECT j.client_id, j.status, cu.email AS client_email FROM jobs j LEFT JOIN users cu ON cu.id = j.client_id WHERE j.id = $1',
+        [req.params.jobId]
+      );
       if (job.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
       const j = job.rows[0];
       if (j.client_id === req.user.id) return res.status(400).json({ error: "You can't bid on your own job" });
       if (j.status === 'test') {
+        // Test jobs: only +test operators, or the poster's own email aliases, can bid
         const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
-        if (!/\+test/i.test((u.rows[0] && u.rows[0].email) || '')) return res.status(404).json({ error: 'Job not found' });
+        const mine = (u.rows[0] && u.rows[0].email) || '';
+        const base = e => { const [l, d] = String(e || '').toLowerCase().split('@'); return (l || '').split('+')[0] + '@' + (d || ''); };
+        if (!/\+test/i.test(mine) && base(mine) !== base(j.client_email)) return res.status(404).json({ error: 'Job not found' });
       } else if (j.status !== 'open') {
         return res.status(400).json({ error: 'This job is no longer taking bids' });
       }

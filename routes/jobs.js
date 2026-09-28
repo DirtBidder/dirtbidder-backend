@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 
+// Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
+const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
+
 module.exports = (pool, authMiddleware) => {
   // Post a new job (client only)
   router.post('/', authMiddleware, async (req, res) => {
@@ -46,16 +49,19 @@ module.exports = (pool, authMiddleware) => {
         // Operators see open jobs. Test operators (+test emails) also see test jobs so the full flow can be tried.
         // Bid amounts stay sealed: operators only get the count and their own bid.
         const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
-        const isTest = u.rows[0] && /\+test/i.test(u.rows[0].email || '');
+        const myEmail = (u.rows[0] && u.rows[0].email) || '';
+        const isTest = /\+test/i.test(myEmail);
         result = await pool.query(
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status
            FROM jobs j
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
-           WHERE j.status = 'open' OR ($2::boolean AND j.status = 'test')
+           LEFT JOIN users cu ON cu.id = j.client_id
+           WHERE j.status = 'open'
+              OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')}))
            ORDER BY j.created_at DESC`,
-          [req.user.id, !!isTest]
+          [req.user.id, isTest, myEmail]
         );
       }
       res.json(result.rows);
