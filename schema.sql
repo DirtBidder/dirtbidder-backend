@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     description TEXT,
     location VARCHAR(255),
     job_type VARCHAR(100),
-    acreage DECIMAL(10,2),
+    acreage VARCHAR(100),
     timeline VARCHAR(100),
     status VARCHAR(50) DEFAULT 'open',
     budget DECIMAL(12,2),
