@@ -37,7 +37,8 @@ module.exports = (pool, authMiddleware) => {
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id AND b.status = 'pending')::int AS pending_bid_count,
              ab.amount AS accepted_amount,
-             COALESCE(NULLIF(ou.company_name, ''), ou.name) AS hired_operator_name
+             COALESCE(NULLIF(ou.company_name, ''), ou.name) AS hired_operator_name,
+             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id) AS photos
            FROM jobs j
            LEFT JOIN bids ab ON ab.job_id = j.id AND ab.status = 'accepted'
            LEFT JOIN users ou ON ou.id = ab.operator_id
@@ -54,7 +55,8 @@ module.exports = (pool, authMiddleware) => {
         result = await pool.query(
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
-             mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status
+             mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status,
+             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id) AS photos
            FROM jobs j
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
            LEFT JOIN users cu ON cu.id = j.client_id
@@ -85,6 +87,27 @@ module.exports = (pool, authMiddleware) => {
         [req.params.id]
       );
       res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Add a photo to a job (only the client who posted it). Body: { image: "data:image/jpeg;base64,..." }
+  router.post('/:id/photos', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(req.body.image || '');
+      if (!m) return res.status(400).json({ error: 'Photo must be a JPG, PNG or WebP image' });
+      const buf = Buffer.from(m[2], 'base64');
+      if (buf.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Photo is too large' });
+      const count = await pool.query('SELECT COUNT(*)::int AS n FROM job_photos WHERE job_id = $1', [req.params.id]);
+      if (count.rows[0].n >= 10) return res.status(400).json({ error: 'A job can have up to 10 photos' });
+      const token = require('crypto').randomBytes(24).toString('hex');
+      await pool.query('INSERT INTO job_photos (job_id, token, mime, data) VALUES ($1, $2, $3, $4)', [req.params.id, token, m[1], buf]);
+      res.json({ token });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
