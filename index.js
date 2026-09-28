@@ -154,7 +154,9 @@ async function runMigrations() {
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS amount DECIMAL(12,2)",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS message TEXT",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'",
-      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()"
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS est_days INTEGER",
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT"
     ];
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
