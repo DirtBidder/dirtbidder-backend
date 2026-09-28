@@ -37,7 +37,7 @@ module.exports = (pool, authMiddleware) => {
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id AND b.status = 'pending')::int AS pending_bid_count,
              ab.amount AS accepted_amount,
-             ou.name AS hired_operator_name
+             COALESCE(NULLIF(ou.company_name, ''), ou.name) AS hired_operator_name
            FROM jobs j
            LEFT JOIN bids ab ON ab.job_id = j.id AND ab.status = 'accepted'
            LEFT JOIN users ou ON ou.id = ab.operator_id
@@ -79,7 +79,7 @@ module.exports = (pool, authMiddleware) => {
       if (job.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       const result = await pool.query(
         `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at,
-                u.name AS operator_name
+                COALESCE(NULLIF(u.company_name, ''), u.name) AS operator_name
          FROM bids b LEFT JOIN users u ON u.id = b.operator_id
          WHERE b.job_id = $1 ORDER BY b.created_at DESC`,
         [req.params.id]

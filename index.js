@@ -19,7 +19,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 // Signup
 app.post('/api/signup', async (req, res) => {
   try {
-    const { email, password, name, phone, role } = req.body;
+    const { email, password, name, phone, role, profile } = req.body;
+    const companyName = profile && typeof profile.companyName === 'string' ? profile.companyName.trim().slice(0, 255) : null;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -27,8 +28,8 @@ app.post('/api/signup', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (email, password_hash, role, name, phone) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, role, name',
-      [email, hash, role || 'client', name, phone]
+      'INSERT INTO users (email, password_hash, role, name, phone, company_name, profile) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, role, name',
+      [email, hash, role === 'operator' ? 'operator' : 'client', name, phone, companyName || null, profile ? JSON.stringify(profile) : null]
     );
 
     const user = result.rows[0];
@@ -81,7 +82,7 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, company_name FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json(result.rows[0]);
   } catch (err) {
@@ -155,6 +156,9 @@ async function runMigrations() {
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS message TEXT",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile JSONB",
+      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hired_at TIMESTAMP",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS est_days INTEGER",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT"
     ];

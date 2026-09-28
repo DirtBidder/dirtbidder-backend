@@ -79,7 +79,7 @@ module.exports = (pool, authMiddleware) => {
 
       await pool.query("UPDATE bids SET status = 'accepted' WHERE id = $1", [bid.id]);
       await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND id <> $2 AND status = 'pending'", [bid.job_id, bid.id]);
-      await pool.query("UPDATE jobs SET status = 'in_progress' WHERE id = $1", [bid.job_id]);
+      await pool.query("UPDATE jobs SET status = 'in_progress', hired_at = NOW() WHERE id = $1", [bid.job_id]);
 
       res.json({ message: 'Bid accepted' });
     } catch (err) {
