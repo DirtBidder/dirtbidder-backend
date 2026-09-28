@@ -98,6 +98,7 @@ const dashboardRoutes = require('./routes/dashboard');
 app.use('/api/jobs', jobsRoutes(pool, authMiddleware));
 app.use('/api/bids', bidsRoutes(pool, authMiddleware));
 app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
+app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 
 // Owner dashboard data
 app.get('/api/admin/summary', authMiddleware, ownerOnly, async (req, res) => {
@@ -159,6 +160,14 @@ async function runMigrations() {
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile JSONB",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hired_at TIMESTAMP",
+      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS bid_id INTEGER REFERENCES bids(id)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS client_fee DECIMAL(12,2)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS operator_fee DECIMAL(12,2)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS client_total DECIMAL(12,2)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS operator_payout DECIMAL(12,2)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS stripe_session_id VARCHAR(255)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS released_at TIMESTAMP",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS est_days INTEGER",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT"
     ];

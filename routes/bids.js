@@ -1,5 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const { stripe, FRONTEND_URL } = require('../lib/stripe');
+const { breakdown } = require('../utils/fees');
+const { hireBid } = require('../lib/hire');
 
 module.exports = (pool, authMiddleware) => {
   // Submit a bid on a job (operators only)
@@ -77,11 +80,33 @@ module.exports = (pool, authMiddleware) => {
       if (!['open', 'test'].includes(bid.job_status)) return res.status(400).json({ error: 'This job already has a hired operator' });
       if (bid.status !== 'pending') return res.status(400).json({ error: 'This bid is no longer available' });
 
-      await pool.query("UPDATE bids SET status = 'accepted' WHERE id = $1", [bid.id]);
-      await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND id <> $2 AND status = 'pending'", [bid.job_id, bid.id]);
-      await pool.query("UPDATE jobs SET status = 'in_progress', hired_at = NOW() WHERE id = $1", [bid.job_id]);
+      // Payments not set up yet: hire right away (no escrow)
+      if (!stripe) {
+        await hireBid(pool, bid);
+        return res.json({ message: 'Bid accepted' });
+      }
 
-      res.json({ message: 'Bid accepted' });
+      // Escrow: client pays job + client fee through Stripe Checkout. The hire happens once payment is confirmed.
+      const f = breakdown(bid.amount);
+      const job = await pool.query('SELECT title FROM jobs WHERE id = $1', [bid.job_id]);
+      const title = (job.rows[0] && job.rows[0].title) || 'DirtBidder job';
+      const esc = await pool.query(
+        `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment') RETURNING id`,
+        [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout]
+      );
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        line_items: [
+          { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.job_amount * 100), product_data: { name: title.slice(0, 250), description: 'Held in escrow until you release it' } } },
+          { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.client_fee * 100), product_data: { name: 'DirtBidder service fee' } } }
+        ],
+        metadata: { escrow_id: String(esc.rows[0].id), bid_id: String(bid.id), job_id: String(bid.job_id), client_id: String(req.user.id) },
+        success_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?session_id={CHECKOUT_SESSION_ID}',
+        cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?payment=cancelled'
+      });
+      await pool.query('UPDATE escrow_transactions SET stripe_session_id = $1 WHERE id = $2', [session.id, esc.rows[0].id]);
+      res.json({ checkout_url: session.url });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });

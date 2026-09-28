@@ -91,6 +91,41 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Operator marks the job done; client then releases payment
+  router.post('/:id/complete', authMiddleware, async (req, res) => {
+    try {
+      const r = await pool.query(
+        "SELECT j.status FROM jobs j JOIN bids b ON b.job_id = j.id AND b.status = 'accepted' WHERE j.id = $1 AND b.operator_id = $2",
+        [req.params.id, req.user.id]
+      );
+      if (r.rows.length === 0) return res.status(403).json({ error: 'You are not hired on this job' });
+      if (r.rows[0].status !== 'in_progress') return res.status(400).json({ error: 'This job is not in progress' });
+      await pool.query("UPDATE jobs SET status = 'awaiting_release', completed_at = NOW() WHERE id = $1", [req.params.id]);
+      res.json({ status: 'awaiting_release' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Client confirms the work is done and releases escrow to the operator
+  router.post('/:id/release', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id, status FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['in_progress', 'awaiting_release'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is not ready for release' });
+      // Payout to the operator's bank happens once operator payout accounts (Stripe Connect) are set up;
+      // until then the release is recorded here and paid out from DirtBidder's Stripe balance.
+      await pool.query("UPDATE escrow_transactions SET status = 'released', released_at = NOW() WHERE job_id = $1 AND status = 'held'", [req.params.id]);
+      await pool.query("UPDATE jobs SET status = 'completed', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1", [req.params.id]);
+      res.json({ status: 'completed' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Job detail
   router.get('/:id', authMiddleware, async (req, res) => {
     try {
