@@ -235,6 +235,19 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // One-time fix (Sep 29 2026): admin account daniel@dirtbidder.com was created under the name "John Timms".
+    // Rename it, and hide any job it posted while testing so operators don't see it as real.
+    const fixed = await pool.query(
+      "UPDATE users SET name = 'Daniel Wheeler' WHERE lower(email) = 'daniel@dirtbidder.com' AND name ILIKE 'john timms' RETURNING id"
+    );
+    if (fixed.rows[0]) {
+      const hid = await pool.query(
+        "UPDATE jobs SET status = 'test' WHERE client_id = $1 AND status = 'open' AND created_at < '2026-09-30' RETURNING id",
+        [fixed.rows[0].id]
+      );
+      console.log('Renamed admin account; hid test jobs:', hid.rowCount);
+    }
+
     // Hide any jobs posted by test accounts from operators
     const hidden = await pool.query(
       "UPDATE jobs SET status = 'test' WHERE status = 'open' AND client_id IN (SELECT id FROM users WHERE email ILIKE '%+test%')"
