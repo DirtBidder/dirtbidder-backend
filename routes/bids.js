@@ -3,6 +3,7 @@ const router = express.Router();
 const { stripe, FRONTEND_URL } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
 const { hireBid } = require('../lib/hire');
+const notify = require('../lib/notify');
 
 module.exports = (pool, authMiddleware) => {
   // Submit a bid on a job (operators only)
@@ -38,6 +39,7 @@ module.exports = (pool, authMiddleware) => {
          VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING *`,
         [req.params.jobId, req.user.id, amt, message || null, isNaN(days) ? null : days, equipment || null]
       );
+      notify.newBid(pool, result.rows[0].id);
       res.json(result.rows[0]);
     } catch (err) {
       console.error(err);
@@ -86,6 +88,7 @@ module.exports = (pool, authMiddleware) => {
       // Payments not set up yet: hire right away (no escrow)
       if (!stripe) {
         await hireBid(pool, bid);
+        notify.hired(pool, bid.job_id);
         return res.json({ message: 'Bid accepted' });
       }
 

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { stripe, isTestMode } = require('../lib/stripe');
 const { hireBid } = require('../lib/hire');
+const notify = require('../lib/notify');
 
 module.exports = (pool, authMiddleware) => {
   // Is escrow switched on? (front end uses this to word things)
@@ -37,6 +38,7 @@ module.exports = (pool, authMiddleware) => {
       );
       // Any other unpaid checkouts on this job are void
       await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE job_id = $1 AND id <> $2 AND status = 'pending_payment'", [e.job_id, e.id]);
+      notify.hired(pool, e.job_id);
       res.json({ status: 'held' });
     } catch (err) {
       console.error(err);

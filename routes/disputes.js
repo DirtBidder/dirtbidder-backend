@@ -6,6 +6,7 @@ const { stripe } = require('../lib/stripe');
 const { feePerSide } = require('../utils/fees');
 const { releaseJob, AUTO_RELEASE_HOURS } = require('../lib/release');
 const { payPendingPayouts } = require('../lib/payouts');
+const notify = require('../lib/notify');
 
 module.exports = (pool, authMiddleware, adminOnly) => {
   // Client reports a problem: freezes the escrow until DirtBidder decides
@@ -31,6 +32,8 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       );
       await pool.query("UPDATE escrow_transactions SET status = 'disputed' WHERE id = $1", [esc.rows[0].id]);
       await pool.query("UPDATE jobs SET status = 'disputed' WHERE id = $1", [req.params.id]);
+      // Give the client a moment to upload photos before the admin email goes out
+      setTimeout(() => notify.disputeOpened(pool, d.rows[0].id), 60 * 1000);
       res.json({ id: d.rows[0].id });
     } catch (err) {
       console.error(err);
@@ -149,6 +152,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
           "UPDATE disputes SET status = 'resolved', resolution = 'release', operator_amount = $1, admin_note = $2, resolved_at = NOW(), resolved_by = $3 WHERE id = $4",
           [jobAmount, note || null, req.user.id, d.id]
         );
+        notify.disputeResolved(pool, d.id);
         return res.json({ ok: true });
       }
 
@@ -166,6 +170,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
           "UPDATE disputes SET status = 'resolved', resolution = 'refund', refund_amount = $1, operator_amount = 0, admin_note = $2, resolved_at = NOW(), resolved_by = $3 WHERE id = $4",
           [Number(d.client_total), note || null, req.user.id, d.id]
         );
+        notify.disputeResolved(pool, d.id);
         return res.json({ ok: true });
       }
 
@@ -189,6 +194,8 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       );
       const op = await pool.query("SELECT operator_id FROM bids WHERE job_id = $1 AND status = 'accepted' LIMIT 1", [d.job_id]);
       if (op.rows[0]) await payPendingPayouts(pool, op.rows[0].operator_id);
+      notify.released(pool, d.job_id);
+      notify.disputeResolved(pool, d.id);
       res.json({ ok: true });
     } catch (err) {
       console.error('Resolve dispute error:', err.message);

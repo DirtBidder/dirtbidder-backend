@@ -127,6 +127,7 @@ module.exports = (pool, authMiddleware) => {
       if (r.rows.length === 0) return res.status(403).json({ error: 'You are not hired on this job' });
       if (r.rows[0].status !== 'in_progress') return res.status(400).json({ error: 'This job is not in progress' });
       await pool.query("UPDATE jobs SET status = 'awaiting_release', completed_at = NOW() WHERE id = $1", [req.params.id]);
+      require('../lib/notify').markedComplete(pool, req.params.id);
       res.json({ status: 'awaiting_release' });
     } catch (err) {
       console.error(err);

@@ -112,6 +112,7 @@ app.use('/api/bids', bidsRoutes(pool, authMiddleware));
 app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
 app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
+app.use('/api/password', require('./routes/password')(pool));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
@@ -219,6 +220,14 @@ async function runMigrations() {
       "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS kind VARCHAR(20) DEFAULT 'site'",
       "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS dispute_id INTEGER REFERENCES disputes(id)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS stripe_refund_id VARCHAR(255)",
+      `CREATE TABLE IF NOT EXISTS password_resets (
+         id SERIAL PRIMARY KEY,
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         token_hash VARCHAR(64) UNIQUE NOT NULL,
+         expires_at TIMESTAMP NOT NULL,
+         used_at TIMESTAMP,
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS bid_id INTEGER REFERENCES bids(id)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS client_fee DECIMAL(12,2)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS operator_fee DECIMAL(12,2)",
