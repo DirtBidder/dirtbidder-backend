@@ -51,6 +51,9 @@ module.exports = (pool, authMiddleware) => {
       const result = await pool.query(
         `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at,
                 j.title AS job_title, j.location AS job_location, j.status AS job_status, j.timeline AS job_timeline,
+                j.completed_at AS job_completed_at,
+                (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note
+                   FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
                 CASE WHEN b.status = 'accepted' THEN cu.name END AS client_name
          FROM bids b
          JOIN jobs j ON j.id = b.job_id

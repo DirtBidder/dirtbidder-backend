@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { payPendingPayouts } = require('../lib/payouts');
+const { releaseJob } = require('../lib/release');
 
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
 const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
@@ -39,7 +39,9 @@ module.exports = (pool, authMiddleware) => {
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id AND b.status = 'pending')::int AS pending_bid_count,
              ab.amount AS accepted_amount,
              COALESCE(NULLIF(ou.company_name, ''), ou.name) AS hired_operator_name,
-             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id) AS photos
+             (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note, d.created_at
+                FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
+             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id AND p.kind = 'site') AS photos
            FROM jobs j
            LEFT JOIN bids ab ON ab.job_id = j.id AND ab.status = 'accepted'
            LEFT JOIN users ou ON ou.id = ab.operator_id
@@ -57,7 +59,7 @@ module.exports = (pool, authMiddleware) => {
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status,
-             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id) AS photos
+             (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id AND p.kind = 'site') AS photos
            FROM jobs j
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
            LEFT JOIN users cu ON cu.id = j.client_id
@@ -104,7 +106,7 @@ module.exports = (pool, authMiddleware) => {
       if (!m) return res.status(400).json({ error: 'Photo must be a JPG, PNG or WebP image' });
       const buf = Buffer.from(m[2], 'base64');
       if (buf.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Photo is too large' });
-      const count = await pool.query('SELECT COUNT(*)::int AS n FROM job_photos WHERE job_id = $1', [req.params.id]);
+      const count = await pool.query("SELECT COUNT(*)::int AS n FROM job_photos WHERE job_id = $1 AND kind = 'site'", [req.params.id]);
       if (count.rows[0].n >= 10) return res.status(400).json({ error: 'A job can have up to 10 photos' });
       const token = require('crypto').randomBytes(24).toString('hex');
       await pool.query('INSERT INTO job_photos (job_id, token, mime, data) VALUES ($1, $2, $3, $4)', [req.params.id, token, m[1], buf]);
@@ -139,11 +141,7 @@ module.exports = (pool, authMiddleware) => {
       if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
       if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       if (!['in_progress', 'awaiting_release'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is not ready for release' });
-      await pool.query("UPDATE escrow_transactions SET status = 'released', released_at = NOW() WHERE job_id = $1 AND status = 'held'", [req.params.id]);
-      await pool.query("UPDATE jobs SET status = 'completed', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1", [req.params.id]);
-      // Send the operator's share to their bank now if their payout account is set up; otherwise it waits until it is
-      const op = await pool.query("SELECT operator_id FROM bids WHERE job_id = $1 AND status = 'accepted' LIMIT 1", [req.params.id]);
-      if (op.rows[0]) await payPendingPayouts(pool, op.rows[0].operator_id);
+      await releaseJob(pool, req.params.id);
       res.json({ status: 'completed' });
     } catch (err) {
       console.error(err);

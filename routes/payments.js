@@ -54,7 +54,7 @@ module.exports = (pool, authMiddleware) => {
          FROM escrow_transactions e
          JOIN jobs j ON j.id = e.job_id
          LEFT JOIN bids b ON b.id = e.bid_id
-         WHERE e.status IN ('held', 'released', 'refund_needed')
+         WHERE e.status IN ('held', 'released', 'refund_needed', 'disputed', 'refunded')
            AND (j.client_id = $1 OR b.operator_id = $1)
          ORDER BY e.created_at DESC`,
         [req.user.id]

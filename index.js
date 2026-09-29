@@ -74,6 +74,17 @@ function authMiddleware(req, res, next) {
   }
 }
 
+// DirtBidder admins (by email). Set ADMIN_EMAILS in Railway to change; comma-separated.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'daniel@dirtbidder.com').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+async function adminOnly(req, res, next) {
+  try {
+    const r = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+    const email = ((r.rows[0] && r.rows[0].email) || '').toLowerCase();
+    if (req.user.role === 'owner' || ADMIN_EMAILS.includes(email)) return next();
+    res.status(403).json({ error: 'Admin access only' });
+  } catch (err) { res.status(500).json({ error: 'Server error' }); }
+}
+
 // Owner-only middleware
 function ownerOnly(req, res, next) {
   if (req.user.role !== 'owner') return res.status(403).json({ error: 'Owner access only' });
@@ -84,6 +95,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, email, role, name, company_name FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -100,6 +112,7 @@ app.use('/api/bids', bidsRoutes(pool, authMiddleware));
 app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
 app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
+app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
 app.get('/api/photos/:token', async (req, res) => {
@@ -185,6 +198,27 @@ async function runMigrations() {
          created_at TIMESTAMP DEFAULT NOW()
        )`,
       "CREATE INDEX IF NOT EXISTS job_photos_job_id ON job_photos(job_id)",
+      `CREATE TABLE IF NOT EXISTS disputes (
+         id SERIAL PRIMARY KEY,
+         job_id INTEGER NOT NULL REFERENCES jobs(id),
+         escrow_id INTEGER REFERENCES escrow_transactions(id),
+         opened_by INTEGER REFERENCES users(id),
+         reason TEXT NOT NULL,
+         previous_job_status VARCHAR(50),
+         status VARCHAR(20) DEFAULT 'open',
+         operator_response TEXT,
+         operator_responded_at TIMESTAMP,
+         resolution VARCHAR(20),
+         refund_amount DECIMAL(12,2),
+         operator_amount DECIMAL(12,2),
+         admin_note TEXT,
+         resolved_by INTEGER REFERENCES users(id),
+         resolved_at TIMESTAMP,
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
+      "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS kind VARCHAR(20) DEFAULT 'site'",
+      "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS dispute_id INTEGER REFERENCES disputes(id)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS stripe_refund_id VARCHAR(255)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS bid_id INTEGER REFERENCES bids(id)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS client_fee DECIMAL(12,2)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS operator_fee DECIMAL(12,2)",
@@ -215,7 +249,13 @@ async function runMigrations() {
     console.error('Migration error:', err);
   }
 }
-runMigrations();
+runMigrations().then(() => {
+  // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours
+  const { autoReleaseDueJobs } = require('./lib/release');
+  const tick = () => autoReleaseDueJobs(pool).catch(err => console.error('Auto-release error:', err.message));
+  tick();
+  setInterval(tick, 15 * 60 * 1000);
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
