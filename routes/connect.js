@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { stripe, FRONTEND_URL } = require('../lib/stripe');
 const { payPendingPayouts } = require('../lib/payouts');
+const v2 = require('../lib/stripeV2');
 
 module.exports = (pool, authMiddleware) => {
   function operatorsOnly(req, res, next) {
@@ -14,30 +15,23 @@ module.exports = (pool, authMiddleware) => {
   // Start (or continue) payout setup: returns a Stripe-hosted link where the operator adds their bank
   router.post('/onboard', authMiddleware, operatorsOnly, async (req, res) => {
     try {
-      const u = await pool.query('SELECT email, stripe_account_id FROM users WHERE id = $1', [req.user.id]);
-      let acctId = u.rows[0] && u.rows[0].stripe_account_id;
+      const u = await pool.query('SELECT email, name, company_name, stripe_account_id FROM users WHERE id = $1', [req.user.id]);
+      const row = u.rows[0];
+      let acctId = row && row.stripe_account_id;
       if (!acctId) {
-        const acct = await stripe.accounts.create({
-          type: 'express',
-          country: 'US',
-          email: u.rows[0].email,
-          capabilities: { transfers: { requested: true } },
-          business_profile: { product_description: 'Earthwork and heavy equipment services booked through DirtBidder', mcc: '1771' },
-          metadata: { dirtbidder_user_id: String(req.user.id) }
-        });
+        const acct = await v2.createRecipientAccount({ email: row.email, name: row.company_name || row.name, userId: req.user.id });
         acctId = acct.id;
         await pool.query('UPDATE users SET stripe_account_id = $1 WHERE id = $2', [acctId, req.user.id]);
       }
-      const link = await stripe.accountLinks.create({
-        account: acctId,
-        type: 'account_onboarding',
-        refresh_url: FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=refresh',
-        return_url: FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=return'
-      });
+      const link = await v2.createOnboardingLink(
+        acctId,
+        FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=return',
+        FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=refresh'
+      );
       res.json({ url: link.url });
     } catch (err) {
-      console.error('Connect onboarding error:', err.message);
-      const msg = /signed up for Connect|platform/i.test(err.message)
+      console.error('Connect onboarding error:', err.code || '', err.message);
+      const msg = /platform_registration_required|connect_profile_not_submitted/i.test(err.code || '')
         ? 'Operator payouts are not switched on in Stripe yet.'
         : 'Could not start payout setup. Please try again.';
       res.status(500).json({ error: msg });
@@ -50,14 +44,14 @@ module.exports = (pool, authMiddleware) => {
       const u = await pool.query('SELECT stripe_account_id FROM users WHERE id = $1', [req.user.id]);
       const acctId = u.rows[0] && u.rows[0].stripe_account_id;
       if (!acctId) return res.json({ connected: false, payouts_enabled: false });
-      const acct = await stripe.accounts.retrieve(acctId);
-      const ready = !!(acct.capabilities && acct.capabilities.transfers === 'active');
+      const acct = await v2.getAccount(acctId);
+      const status = v2.transfersStatus(acct);
+      const ready = status === 'active';
       let sent = 0;
       if (ready) sent = (await payPendingPayouts(pool, req.user.id)).paid;
       res.json({
         connected: true,
-        details_submitted: !!acct.details_submitted,
-        payouts_enabled: ready && !!acct.payouts_enabled,
+        transfers_status: status,
         transfers_active: ready,
         payouts_sent_now: sent
       });
