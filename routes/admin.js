@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { getReputation } = require('../lib/reputation');
 const notify = require('../lib/notify');
+const hq = require('../lib/hq');
 
 module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // Search users by name, company, email or phone. Empty search = newest 50.
@@ -148,6 +149,10 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                   (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE j.status = 'test' OR ${T('c')})::int AS jobs`)
       ]);
 
+      const visitors = await hq.visitorStats(pool).catch(() => ({ today: 0, last_7d: 0, views_7d: 0, top_referrers: [], weekly: {} }));
+      weekly.rows.forEach(w => { w.visitors = visitors.weekly[w.week] || 0; });
+      delete visitors.weekly;
+      const tasks = await pool.query('SELECT id, title, done_at FROM hq_tasks ORDER BY (done_at IS NOT NULL), sort, id').catch(() => ({ rows: [] }));
       const byRole = Object.fromEntries(users.rows.map(r => [r.role, r]));
       const jobsBy = Object.fromEntries(jobs.rows.map(r => [r.status, r.n]));
       res.json({
@@ -171,12 +176,42 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         money: money.rows[0],
         open: open.rows[0],
         weekly: weekly.rows,
-        activity: activity.rows
+        activity: activity.rows,
+        visitors,
+        tasks: tasks.rows
       });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
     }
+  });
+
+  // HQ to-do list
+  router.post('/tasks', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const title = String(req.body.title || '').trim().slice(0, 300);
+      if (!title) return res.status(400).json({ error: 'Type the task first' });
+      const r = await pool.query('INSERT INTO hq_tasks (title, sort) VALUES ($1, (SELECT COALESCE(MAX(sort), 0) + 1 FROM hq_tasks)) RETURNING id, title, done_at', [title]);
+      res.json(r.rows[0]);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  });
+  router.post('/tasks/:id/toggle', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query('UPDATE hq_tasks SET done_at = CASE WHEN done_at IS NULL THEN NOW() ELSE NULL END WHERE id = $1 RETURNING id, title, done_at', [parseInt(req.params.id, 10)]);
+      if (!r.rows[0]) return res.status(404).json({ error: 'Task not found' });
+      res.json(r.rows[0]);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  });
+  router.post('/tasks/:id/delete', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      await pool.query('DELETE FROM hq_tasks WHERE id = $1', [parseInt(req.params.id, 10)]);
+      res.json({ ok: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
+  });
+  // Send the morning report right now (to check what it looks like)
+  router.post('/hq/report-now', authMiddleware, adminOnly, async (req, res) => {
+    try { await hq.sendDailyReport(pool, { force: true }); res.json({ ok: true }); }
+    catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
   });
 
   // All Bids: every bid on the platform, newest first. Filter by status and search by job, operator or client.

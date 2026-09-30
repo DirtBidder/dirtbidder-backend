@@ -181,6 +181,11 @@ app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
 app.use('/api/password', require('./routes/password')(pool));
 app.use('/api/reviews', require('./routes/reviews')(pool, authMiddleware));
 app.use('/api/reports', require('./routes/reports')(pool, authMiddleware));
+// Public page-view counter for the owner's HQ (no login; stores no IPs)
+app.post('/api/track', (req, res) => {
+  require('./lib/hq').track(pool, req).catch(err => console.error('Track error:', err.message));
+  res.status(204).end();
+});
 app.use('/api/admin', require('./routes/admin')(pool, authMiddleware, adminOnly, ADMIN_EMAILS));
 app.use('/api/messages', require('./routes/messages')(pool, authMiddleware, ADMIN_EMAILS));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
@@ -382,10 +387,15 @@ async function runMigrations() {
     console.error('Migration error:', err);
   }
 }
-runMigrations().then(() => {
-  // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours
+runMigrations().then(() => require('./lib/hq').migrate(pool)).then(() => {
+  // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours,
+  // and send the owner's morning report once a day (from 7am Central)
   const { autoReleaseDueJobs } = require('./lib/release');
-  const tick = () => autoReleaseDueJobs(pool).catch(err => console.error('Auto-release error:', err.message));
+  const hq = require('./lib/hq');
+  const tick = () => {
+    autoReleaseDueJobs(pool).catch(err => console.error('Auto-release error:', err.message));
+    hq.reportTick(pool).catch(err => console.error('Daily report error:', err.message));
+  };
   tick();
   setInterval(tick, 15 * 60 * 1000);
 });
