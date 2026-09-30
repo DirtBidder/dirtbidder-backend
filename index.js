@@ -54,6 +54,7 @@ app.post('/api/login', async (req, res) => {
     const user = result.rows[0];
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
+    if (user.suspended_at) return res.status(403).json({ error: SUSPENDED_MSG, suspended: true });
 
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: { id: user.id, email: user.email, role: user.role, name: user.name } });
@@ -64,17 +65,23 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Auth middleware
-function authMiddleware(req, res, next) {
+const SUSPENDED_MSG = 'This account has been suspended. If you think this is a mistake, email support@dirtbidder.com.';
+async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided' });
   const token = authHeader.split(' ')[1];
+  let decoded;
+  try { decoded = jwt.verify(token, JWT_SECRET); } catch (err) { return res.status(401).json({ error: 'Invalid token' }); }
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
+    // Suspended accounts are signed out everywhere, right away
+    const u = await pool.query('SELECT suspended_at FROM users WHERE id = $1', [decoded.id]);
+    if (!u.rows[0]) return res.status(401).json({ error: 'Account not found' });
+    if (u.rows[0].suspended_at) return res.status(401).json({ error: SUSPENDED_MSG, suspended: true });
   } catch (err) {
-    res.status(401).json({ error: 'Invalid token' });
+    if (err.code !== '42703') return res.status(500).json({ error: 'Server error' }); // 42703: column not added yet (first seconds after a deploy)
   }
+  req.user = decoded;
+  next();
 }
 
 // DirtBidder admins (by email). Set ADMIN_EMAILS in Railway to change; comma-separated.
@@ -168,6 +175,7 @@ app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
 app.use('/api/password', require('./routes/password')(pool));
 app.use('/api/reviews', require('./routes/reviews')(pool, authMiddleware));
+app.use('/api/admin', require('./routes/admin')(pool, authMiddleware, adminOnly, ADMIN_EMAILS));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
@@ -247,6 +255,8 @@ async function runMigrations() {
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS site_address TEXT",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMP",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version VARCHAR(20)",
       "CREATE UNIQUE INDEX IF NOT EXISTS reviews_one_per_job ON reviews(job_id, reviewer_id)",
       `CREATE TABLE IF NOT EXISTS job_photos (
