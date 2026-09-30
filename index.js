@@ -182,6 +182,7 @@ app.use('/api/password', require('./routes/password')(pool));
 app.use('/api/reviews', require('./routes/reviews')(pool, authMiddleware));
 app.use('/api/reports', require('./routes/reports')(pool, authMiddleware));
 app.use('/api/admin', require('./routes/admin')(pool, authMiddleware, adminOnly, ADMIN_EMAILS));
+app.use('/api/messages', require('./routes/messages')(pool, authMiddleware, ADMIN_EMAILS));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
@@ -334,7 +335,18 @@ async function runMigrations() {
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS paid_out_at TIMESTAMP",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_account_id VARCHAR(255)",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS est_days INTEGER",
-      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT"
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS equipment TEXT",
+      `CREATE TABLE IF NOT EXISTS messages (
+         id SERIAL PRIMARY KEY,
+         job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+         operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         body TEXT NOT NULL,
+         original_body TEXT,
+         read_at TIMESTAMP,
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
+      "CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages (job_id, operator_id, id)"
     ];
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
