@@ -38,7 +38,8 @@ module.exports = (pool, authMiddleware) => {
           `SELECT j.*,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id AND b.status = 'pending')::int AS pending_bid_count,
-             ab.amount AS accepted_amount,
+             ab.amount AS accepted_amount, ab.operator_id AS hired_operator_id,
+             (SELECT row_to_json(r) FROM (SELECT rv.rating, rv.comment FROM reviews rv WHERE rv.job_id = j.id AND rv.reviewer_id = j.client_id LIMIT 1) r) AS my_review,
              COALESCE(NULLIF(ou.company_name, ''), ou.name) AS hired_operator_name,
              (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note, d.created_at
                 FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
@@ -84,12 +85,14 @@ module.exports = (pool, authMiddleware) => {
       if (job.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
       if (job.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       const result = await pool.query(
-        `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at,
+        `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at, b.operator_id,
                 COALESCE(NULLIF(u.company_name, ''), u.name) AS operator_name
          FROM bids b LEFT JOIN users u ON u.id = b.operator_id
          WHERE b.job_id = $1 ORDER BY b.created_at DESC`,
         [req.params.id]
       );
+      const rep = await require('../lib/reputation').getReputation(pool, result.rows.map(b => b.operator_id));
+      result.rows.forEach(b => { b.reputation = rep[b.operator_id] || null; });
       res.json(result.rows);
     } catch (err) {
       console.error(err);

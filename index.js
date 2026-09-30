@@ -144,6 +144,7 @@ app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
 app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
 app.use('/api/password', require('./routes/password')(pool));
+app.use('/api/reviews', require('./routes/reviews')(pool, authMiddleware));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
@@ -222,6 +223,7 @@ async function runMigrations() {
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hired_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS site_address TEXT",
+      "CREATE UNIQUE INDEX IF NOT EXISTS reviews_one_per_job ON reviews(job_id, reviewer_id)",
       `CREATE TABLE IF NOT EXISTS job_photos (
          id SERIAL PRIMARY KEY,
          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
