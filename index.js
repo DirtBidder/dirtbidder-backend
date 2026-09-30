@@ -14,6 +14,8 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Date of the Terms of Service / Privacy Policy users agree to at signup
+const TERMS_VERSION = '2026-09-29';
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 
 // Signup
@@ -28,8 +30,9 @@ app.post('/api/signup', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (email, password_hash, role, name, phone, company_name, profile) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email, role, name',
-      [email, hash, role === 'operator' ? 'operator' : 'client', name, phone, companyName || null, profile ? JSON.stringify(profile) : null]
+      'INSERT INTO users (email, password_hash, role, name, phone, company_name, profile, terms_accepted_at, terms_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, email, role, name',
+      [email, hash, role === 'operator' ? 'operator' : 'client', name, phone, companyName || null, profile ? JSON.stringify(profile) : null,
+       req.body.accepted_terms === true ? new Date() : null, req.body.accepted_terms === true ? TERMS_VERSION : null]
     );
 
     const user = result.rows[0];
@@ -243,6 +246,8 @@ async function runMigrations() {
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hired_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS site_address TEXT",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version VARCHAR(20)",
       "CREATE UNIQUE INDEX IF NOT EXISTS reviews_one_per_job ON reviews(job_id, reviewer_id)",
       `CREATE TABLE IF NOT EXISTS job_photos (
          id SERIAL PRIMARY KEY,
