@@ -93,7 +93,7 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
@@ -113,6 +113,26 @@ app.put('/api/me', authMiddleware, async (req, res) => {
       'UPDATE users SET name = $1, phone = $2, company_name = $3 WHERE id = $4 RETURNING id, email, role, name, phone, company_name',
       [name, phone || null, company || null, req.user.id]);
     res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Operator profile details (equipment, service area, experience, short bio). Only known keys are kept.
+app.put('/api/me/profile', authMiddleware, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const str = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : undefined;
+    const patch = {};
+    if (Array.isArray(b.equipment)) patch.equipment = b.equipment.filter(x => typeof x === 'string').map(x => x.trim().slice(0, 60)).filter(Boolean).slice(0, 30);
+    for (const [k, n] of [['equipmentOther', 300], ['zip', 10], ['serviceRadius', 30], ['yearsExp', 30], ['bio', 800]]) {
+      const v = str(b[k], n); if (v !== undefined) patch[k] = v;
+    }
+    const r = await pool.query(
+      "UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || $1::jsonb WHERE id = $2 RETURNING profile",
+      [JSON.stringify(patch), req.user.id]);
+    res.json(r.rows[0].profile);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

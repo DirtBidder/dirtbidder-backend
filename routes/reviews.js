@@ -34,12 +34,14 @@ module.exports = (pool, authMiddleware) => {
   async function operatorProfile(id) {
     const rep = (await getReputation(pool, [id]))[id];
     if (!rep) return null;
-    const u = await pool.query("SELECT COALESCE(NULLIF(company_name, ''), name) AS name, created_at FROM users WHERE id = $1", [id]);
+    const u = await pool.query("SELECT COALESCE(NULLIF(company_name, ''), name) AS name, created_at, profile FROM users WHERE id = $1", [id]);
     const list = await pool.query(
       `SELECT rv.rating, rv.comment, rv.created_at, j.title AS job_title, split_part(COALESCE(cu.name, ''), ' ', 1) AS reviewer
        FROM reviews rv JOIN jobs j ON j.id = rv.job_id LEFT JOIN users cu ON cu.id = rv.reviewer_id
        WHERE rv.reviewee_id = $1 ORDER BY rv.created_at DESC LIMIT 50`, [id]);
-    return { name: u.rows[0] && u.rows[0].name, member_since: u.rows[0] && u.rows[0].created_at, ...rep, reviews: list.rows };
+    const pr = (u.rows[0] && u.rows[0].profile) || {};
+    const about = { equipment: pr.equipment || [], equipment_other: pr.equipmentOther || '', years: pr.yearsExp || '', service_radius: pr.serviceRadius || '', bio: pr.bio || '' };
+    return { name: u.rows[0] && u.rows[0].name, member_since: u.rows[0] && u.rows[0].created_at, about, ...rep, reviews: list.rows };
   }
 
   router.get('/operator/:id', authMiddleware, async (req, res) => {
