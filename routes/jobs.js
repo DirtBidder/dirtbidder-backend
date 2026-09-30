@@ -10,15 +10,16 @@ module.exports = (pool, authMiddleware) => {
   router.post('/', authMiddleware, async (req, res) => {
     try {
       const { title, description, location, job_type, acreage, timeline, budget } = req.body;
+      const siteAddress = typeof req.body.site_address === 'string' ? req.body.site_address.trim().slice(0, 500) || null : null;
       if (!title) return res.status(400).json({ error: 'Title is required' });
 
       // Jobs from test accounts (emails containing "+test") are hidden from operators
       const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
       const isTest = u.rows[0] && /\+test/i.test(u.rows[0].email || '');
       const result = await pool.query(
-        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-        [req.user.id, title, description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open']
+        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status, site_address)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [req.user.id, title, description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open', siteAddress]
       );
       res.json(result.rows[0]);
     } catch (err) {
@@ -150,12 +151,32 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
-  // Job detail
+  // Client adds or changes the exact job-site address (private: only the hired operator ever sees it)
+  router.put('/:id/address', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      const addr = String(req.body.site_address || '').trim().slice(0, 500) || null;
+      await pool.query('UPDATE jobs SET site_address = $1 WHERE id = $2', [addr, req.params.id]);
+      res.json({ site_address: addr });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Job detail. The exact address is only included for the client who posted it and the hired operator.
   router.get('/:id', authMiddleware, async (req, res) => {
     try {
       const result = await pool.query('SELECT * FROM jobs WHERE id = $1', [req.params.id]);
       if (result.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
-      res.json(result.rows[0]);
+      const job = result.rows[0];
+      if (job.client_id !== req.user.id) {
+        const hired = await pool.query("SELECT 1 FROM bids WHERE job_id = $1 AND operator_id = $2 AND status = 'accepted'", [job.id, req.user.id]);
+        if (hired.rows.length === 0) delete job.site_address;
+      }
+      res.json(job);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });

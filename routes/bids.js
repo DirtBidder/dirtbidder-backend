@@ -56,7 +56,9 @@ module.exports = (pool, authMiddleware) => {
                 j.completed_at AS job_completed_at,
                 (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note
                    FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
-                CASE WHEN b.status = 'accepted' THEN cu.name END AS client_name
+                CASE WHEN b.status = 'accepted' THEN cu.name END AS client_name,
+                CASE WHEN b.status = 'accepted' THEN cu.phone END AS client_phone,
+                CASE WHEN b.status = 'accepted' THEN j.site_address END AS job_address
          FROM bids b
          JOIN jobs j ON j.id = b.job_id
          LEFT JOIN users cu ON cu.id = j.client_id

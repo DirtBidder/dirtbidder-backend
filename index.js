@@ -93,10 +93,41 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, company_name FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update your own name, phone and company name (Settings page)
+app.put('/api/me', authMiddleware, async (req, res) => {
+  try {
+    const clean = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : null;
+    const name = clean(req.body.name, 255), phone = clean(req.body.phone, 50), company = clean(req.body.company_name, 255);
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const r = await pool.query(
+      'UPDATE users SET name = $1, phone = $2, company_name = $3 WHERE id = $4 RETURNING id, email, role, name, phone, company_name',
+      [name, phone || null, company || null, req.user.id]);
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Change password while logged in (needs the current one)
+app.post('/api/me/password', authMiddleware, async (req, res) => {
+  try {
+    const current = String(req.body.current_password || ''), next = String(req.body.new_password || '');
+    if (next.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    const u = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!u.rows[0] || !(await bcrypt.compare(current, u.rows[0].password_hash))) return res.status(400).json({ error: 'Current password is wrong' });
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(next, 10), req.user.id]);
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -190,6 +221,7 @@ async function runMigrations() {
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile JSONB",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hired_at TIMESTAMP",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS site_address TEXT",
       `CREATE TABLE IF NOT EXISTS job_photos (
          id SERIAL PRIMARY KEY,
          job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
