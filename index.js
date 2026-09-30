@@ -257,6 +257,13 @@ async function runMigrations() {
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMP",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT",
+      `CREATE TABLE IF NOT EXISTS user_warnings (
+         id SERIAL PRIMARY KEY,
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         reason TEXT NOT NULL,
+         created_by INTEGER REFERENCES users(id),
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version VARCHAR(20)",
       "CREATE UNIQUE INDEX IF NOT EXISTS reviews_one_per_job ON reviews(job_id, reviewer_id)",
       `CREATE TABLE IF NOT EXISTS job_photos (
