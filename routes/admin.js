@@ -76,6 +76,38 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // All Bids: every bid on the platform, newest first. Filter by status and search by job, operator or client.
+  router.get('/bids', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      const allowed = ['pending', 'accepted', 'declined', 'withdrawn'];
+      const status = allowed.includes(req.query.status) ? req.query.status : '';
+      const like = '%' + q.replace(/[%_]/g, m => '\\' + m) + '%';
+      const r = await pool.query(
+        `SELECT b.id, b.amount, b.status, b.message, b.est_days, b.equipment, b.created_at,
+                j.id AS job_id, j.title AS job_title, j.status AS job_status, j.location AS job_location, j.budget AS job_budget,
+                o.id AS operator_id, o.name AS operator_name, o.company_name AS operator_company, o.email AS operator_email,
+                o.suspended_at AS operator_suspended,
+                c.id AS client_id, c.name AS client_name, c.email AS client_email,
+                (SELECT COUNT(*) FROM bids b2 WHERE b2.job_id = j.id)::int AS bids_on_job,
+                (SELECT COUNT(*) FROM flags f WHERE f.user_id = o.id AND f.status = 'open')::int AS operator_open_flags
+         FROM bids b
+         JOIN jobs j ON j.id = b.job_id
+         JOIN users o ON o.id = b.operator_id
+         LEFT JOIN users c ON c.id = j.client_id
+         WHERE ($1 = '' OR b.status = $1)
+           AND ($2 = '' OR j.title ILIKE $3 OR j.location ILIKE $3 OR o.name ILIKE $3 OR o.company_name ILIKE $3
+                OR o.email ILIKE $3 OR c.name ILIKE $3 OR c.email ILIKE $3)
+         ORDER BY b.created_at DESC NULLS LAST, b.id DESC LIMIT 200`,
+        [status, q, like]);
+      const counts = await pool.query('SELECT status, COUNT(*)::int AS n FROM bids GROUP BY status');
+      res.json({ bids: r.rows, counts: Object.fromEntries(counts.rows.map(c => [c.status || 'pending', c.n])) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Flagged list: bids/posts/profiles with contact info, client reports, suspicious patterns
   router.get('/flags', authMiddleware, adminOnly, async (req, res) => {
     try {
