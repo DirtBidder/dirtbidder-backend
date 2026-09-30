@@ -24,11 +24,11 @@ module.exports = (pool, authMiddleware) => {
       const j = job.rows[0];
       if (j.client_id === req.user.id) return res.status(400).json({ error: "You can't bid on your own job" });
       if (j.status === 'test') {
-        // Test jobs: only +test operators, or the poster's own email aliases, can bid
+        // Test jobs: only +test / +op operators, or the poster's own email aliases, can bid
         const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
         const mine = (u.rows[0] && u.rows[0].email) || '';
         const base = e => { const [l, d] = String(e || '').toLowerCase().split('@'); return (l || '').split('+')[0] + '@' + (d || ''); };
-        if (!/\+test/i.test(mine) && base(mine) !== base(j.client_email)) return res.status(404).json({ error: 'Job not found' });
+        if (!/\+(test|op)\d*@/i.test(mine) && base(mine) !== base(j.client_email)) return res.status(404).json({ error: 'Job not found' });
       } else if (j.status !== 'open') {
         return res.status(400).json({ error: 'This job is no longer taking bids' });
       }

@@ -61,7 +61,7 @@ module.exports = (pool, authMiddleware) => {
         // Bid amounts stay sealed: operators only get the count and their own bid.
         const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
         const myEmail = (u.rows[0] && u.rows[0].email) || '';
-        const isTest = /\+test/i.test(myEmail);
+        const isTest = /\+(test|op)\d*@/i.test(myEmail);
         result = await pool.query(
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
