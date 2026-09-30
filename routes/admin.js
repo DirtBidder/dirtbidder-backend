@@ -76,6 +76,109 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // HQ: the owner's overview — totals, money, weekly trends and recent activity.
+  // Test accounts (+test / +op emails) and their jobs/bids/payments are left out unless ?test=1.
+  router.get('/hq', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const withTest = req.query.test === '1';
+      const T = a => `${a}.email ~* '\\+(test|op)[0-9]*@'`; // is a test account
+      const realUser = a => `($1::boolean OR NOT ${T(a)})`;
+      const realJob = (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT ${T(c)}))`;
+      const p = [withTest];
+
+      const [users, jobs, bids, money, open, weekly, activity, hidden] = await Promise.all([
+        pool.query(
+          `SELECT u.role, COUNT(*)::int AS total,
+                  COUNT(*) FILTER (WHERE u.created_at > NOW() - INTERVAL '7 days')::int AS new_7d,
+                  COUNT(*) FILTER (WHERE u.suspended_at IS NOT NULL)::int AS suspended
+           FROM users u WHERE ${realUser('u')} GROUP BY u.role`, p),
+        pool.query(
+          `SELECT j.status, COUNT(*)::int AS n FROM jobs j JOIN users c ON c.id = j.client_id
+           WHERE ${realJob('j', 'c')} GROUP BY j.status`, p),
+        pool.query(
+          `SELECT COUNT(*)::int AS total,
+                  COUNT(*) FILTER (WHERE b.status = 'pending')::int AS pending,
+                  COUNT(*) FILTER (WHERE b.created_at > NOW() - INTERVAL '7 days')::int AS new_7d,
+                  COALESCE(AVG(b.amount), 0)::float AS avg_bid
+           FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
+           WHERE ${realJob('j', 'c')} AND ${realUser('o')}`, p),
+        pool.query(
+          `SELECT COALESCE(SUM(e.amount) FILTER (WHERE e.status IN ('held', 'disputed')), 0)::float AS in_escrow,
+                  COUNT(*) FILTER (WHERE e.status = 'disputed')::int AS frozen,
+                  COALESCE(SUM(e.amount) FILTER (WHERE e.status = 'released'), 0)::float AS job_value_done,
+                  COALESCE(SUM(COALESCE(e.client_fee, 0) + COALESCE(e.operator_fee, 0)) FILTER (WHERE e.status = 'released'), 0)::float AS fees_earned,
+                  COALESCE(SUM(COALESCE(e.client_fee, 0) + COALESCE(e.operator_fee, 0)) FILTER (WHERE e.status IN ('held', 'disputed')), 0)::float AS fees_pending,
+                  COALESCE(SUM(e.operator_payout) FILTER (WHERE e.status = 'released'), 0)::float AS paid_to_operators,
+                  COUNT(*) FILTER (WHERE e.status IN ('refunded', 'refund_needed'))::int AS refunds
+           FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
+           WHERE ${realJob('j', 'c')}`, p),
+        pool.query(
+          `SELECT (SELECT COUNT(*) FROM disputes WHERE status = 'open')::int AS disputes,
+                  (SELECT COUNT(*) FROM flags WHERE status = 'open')::int AS flags`),
+        pool.query(
+          `WITH w AS (SELECT generate_series(date_trunc('week', NOW()) - INTERVAL '7 weeks', date_trunc('week', NOW()), INTERVAL '1 week') AS wk)
+           SELECT to_char(w.wk, 'YYYY-MM-DD') AS week,
+             (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND ${realUser('u')})::int AS signups,
+             (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE date_trunc('week', j.created_at) = w.wk AND ${realJob('j', 'c')})::int AS jobs,
+             (SELECT COUNT(*) FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
+                WHERE date_trunc('week', b.created_at) = w.wk AND ${realJob('j', 'c')} AND ${realUser('o')})::int AS bids,
+             (SELECT COALESCE(SUM(e.amount), 0) FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
+                WHERE date_trunc('week', e.created_at) = w.wk AND e.status NOT IN ('pending_payment', 'cancelled') AND ${realJob('j', 'c')})::float AS paid_in
+           FROM w ORDER BY w.wk`, p),
+        pool.query(
+          `SELECT * FROM (
+             SELECT 'signup' AS kind, u.created_at AS at, COALESCE(NULLIF(u.company_name, ''), u.name, u.email) AS who, u.role AS detail, NULL::numeric AS amount
+               FROM users u WHERE ${realUser('u')}
+             UNION ALL
+             SELECT 'job', j.created_at, c.name, j.title, j.budget FROM jobs j JOIN users c ON c.id = j.client_id WHERE ${realJob('j', 'c')}
+             UNION ALL
+             SELECT 'bid', b.created_at, COALESCE(NULLIF(o.company_name, ''), o.name), j.title, b.amount
+               FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
+               WHERE ${realJob('j', 'c')} AND ${realUser('o')}
+             UNION ALL
+             SELECT 'payment', e.created_at, c.name, j.title, e.amount
+               FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
+               WHERE e.status NOT IN ('pending_payment', 'cancelled') AND ${realJob('j', 'c')}
+             UNION ALL
+             SELECT 'dispute', d.created_at, c.name, j.title, NULL FROM disputes d JOIN jobs j ON j.id = d.job_id JOIN users c ON c.id = j.client_id
+               WHERE ${realJob('j', 'c')}
+           ) a WHERE a.at IS NOT NULL ORDER BY a.at DESC LIMIT 25`, p),
+        pool.query(
+          `SELECT (SELECT COUNT(*) FROM users u WHERE ${T('u')})::int AS users,
+                  (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE j.status = 'test' OR ${T('c')})::int AS jobs`)
+      ]);
+
+      const byRole = Object.fromEntries(users.rows.map(r => [r.role, r]));
+      const jobsBy = Object.fromEntries(jobs.rows.map(r => [r.status, r.n]));
+      res.json({
+        with_test: withTest,
+        hidden_test: hidden.rows[0],
+        users: {
+          clients: (byRole.client || {}).total || 0,
+          operators: (byRole.operator || {}).total || 0,
+          new_7d: users.rows.reduce((n, r) => n + r.new_7d, 0),
+          suspended: users.rows.reduce((n, r) => n + r.suspended, 0)
+        },
+        jobs: {
+          total: jobs.rows.reduce((n, r) => n + r.n, 0),
+          open: (jobsBy.open || 0) + (withTest ? (jobsBy.test || 0) : 0),
+          in_progress: (jobsBy.in_progress || 0) + (jobsBy.awaiting_release || 0),
+          disputed: jobsBy.disputed || 0,
+          completed: jobsBy.completed || 0,
+          closed: (jobsBy.closed || 0) + (jobsBy.cancelled || 0)
+        },
+        bids: bids.rows[0],
+        money: money.rows[0],
+        open: open.rows[0],
+        weekly: weekly.rows,
+        activity: activity.rows
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // All Bids: every bid on the platform, newest first. Filter by status and search by job, operator or client.
   router.get('/bids', authMiddleware, adminOnly, async (req, res) => {
     try {
