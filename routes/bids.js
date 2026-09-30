@@ -1,4 +1,5 @@
 const express = require('express');
+const { scanFields, addFlag } = require('../lib/flags');
 const router = express.Router();
 const { stripe, FRONTEND_URL } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
@@ -34,11 +35,15 @@ module.exports = (pool, authMiddleware) => {
       const dup = await pool.query('SELECT id FROM bids WHERE job_id = $1 AND operator_id = $2', [req.params.jobId, req.user.id]);
       if (dup.rows.length) return res.status(400).json({ error: "You've already bid on this job" });
 
+      // Contact info is hidden until hire; attempts to take the job off DirtBidder are flagged for the admin
+      const scan = scanFields({ message: message || null, equipment: equipment || null });
       const result = await pool.query(
         `INSERT INTO bids (job_id, operator_id, amount, message, est_days, equipment, status)
          VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING *`,
-        [req.params.jobId, req.user.id, amt, message || null, isNaN(days) ? null : days, equipment || null]
+        [req.params.jobId, req.user.id, amt, scan.cleaned.message, isNaN(days) ? null : days, scan.cleaned.equipment]
       );
+      if (scan.reasons.length) addFlag(pool, { kind: 'bid', userId: req.user.id, jobId: Number(req.params.jobId), bidId: result.rows[0].id,
+        reason: 'Bid message ' + scan.reasons.join(', '), details: scan.original });
       notify.newBid(pool, result.rows[0].id);
       res.json(result.rows[0]);
     } catch (err) {

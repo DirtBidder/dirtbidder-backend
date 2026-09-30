@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { releaseJob } = require('../lib/release');
+const { scanFields, addFlag, checkClosePattern } = require('../lib/flags');
 
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
 const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
@@ -16,11 +17,15 @@ module.exports = (pool, authMiddleware) => {
       // Jobs from test accounts (emails containing "+test") are hidden from operators
       const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
       const isTest = u.rows[0] && /\+test/i.test(u.rows[0].email || '');
+      // Public job text can't carry phone numbers/emails (those go in the private address field)
+      const scan = scanFields({ title, description });
       const result = await pool.query(
         `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status, site_address)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.user.id, title, description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open', siteAddress]
+        [req.user.id, scan.cleaned.title, scan.cleaned.description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open', siteAddress]
       );
+      if (scan.reasons.length) addFlag(pool, { kind: 'job', userId: req.user.id, jobId: result.rows[0].id,
+        reason: 'Job post ' + scan.reasons.join(', '), details: scan.original });
       res.json(result.rows[0]);
     } catch (err) {
       console.error(err);
@@ -166,6 +171,7 @@ module.exports = (pool, authMiddleware) => {
       const declined = await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND status = 'pending' RETURNING operator_id", [req.params.id]);
       await pool.query("UPDATE jobs SET status = 'closed' WHERE id = $1", [req.params.id]);
       require('../lib/notify').jobClosed(pool, req.params.id, declined.rows.map(r => r.operator_id));
+      if (declined.rows.length) checkClosePattern(pool, req.user.id).catch(e => console.error('pattern check:', e.message));
       res.json({ status: 'closed' });
     } catch (err) {
       console.error(err);

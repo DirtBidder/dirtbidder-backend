@@ -139,6 +139,11 @@ app.put('/api/me/profile', authMiddleware, async (req, res) => {
     for (const [k, n] of [['equipmentOther', 300], ['zip', 10], ['serviceRadius', 30], ['yearsExp', 30], ['bio', 800]]) {
       const v = str(b[k], n); if (v !== undefined) patch[k] = v;
     }
+    const { scanFields, addFlag } = require('./lib/flags');
+    const scan = scanFields({ bio: patch.bio, equipmentOther: patch.equipmentOther });
+    if (patch.bio !== undefined) patch.bio = scan.cleaned.bio;
+    if (patch.equipmentOther !== undefined) patch.equipmentOther = scan.cleaned.equipmentOther;
+    if (scan.reasons.length) addFlag(pool, { kind: 'profile', userId: req.user.id, reason: 'Profile ' + scan.reasons.join(', '), details: scan.original });
     const r = await pool.query(
       "UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || $1::jsonb WHERE id = $2 RETURNING profile",
       [JSON.stringify(patch), req.user.id]);
@@ -175,6 +180,7 @@ app.use('/api/payments', require('./routes/payments')(pool, authMiddleware));
 app.use('/api/connect', require('./routes/connect')(pool, authMiddleware));
 app.use('/api/password', require('./routes/password')(pool));
 app.use('/api/reviews', require('./routes/reviews')(pool, authMiddleware));
+app.use('/api/reports', require('./routes/reports')(pool, authMiddleware));
 app.use('/api/admin', require('./routes/admin')(pool, authMiddleware, adminOnly, ADMIN_EMAILS));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
@@ -257,6 +263,19 @@ async function runMigrations() {
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMP",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT",
+      `CREATE TABLE IF NOT EXISTS flags (
+         id SERIAL PRIMARY KEY,
+         kind VARCHAR(20) NOT NULL,
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         reporter_id INTEGER REFERENCES users(id),
+         job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+         bid_id INTEGER REFERENCES bids(id) ON DELETE SET NULL,
+         reason TEXT NOT NULL,
+         details TEXT,
+         status VARCHAR(20) DEFAULT 'open',
+         reviewed_at TIMESTAMP,
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
       `CREATE TABLE IF NOT EXISTS user_warnings (
          id SERIAL PRIMARY KEY,
          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

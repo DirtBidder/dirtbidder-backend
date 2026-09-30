@@ -76,6 +76,36 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // Flagged list: bids/posts/profiles with contact info, client reports, suspicious patterns
+  router.get('/flags', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const status = req.query.status === 'reviewed' ? 'reviewed' : 'open';
+      const r = await pool.query(
+        `SELECT f.*, u.email, u.name, u.company_name, u.role, u.suspended_at, j.title AS job_title,
+                ru.name AS reporter_name, ru.email AS reporter_email,
+                (SELECT COUNT(*) FROM flags f2 WHERE f2.user_id = f.user_id)::int AS total_flags,
+                (SELECT COUNT(*) FROM user_warnings w WHERE w.user_id = f.user_id)::int AS warnings
+         FROM flags f JOIN users u ON u.id = f.user_id
+         LEFT JOIN jobs j ON j.id = f.job_id LEFT JOIN users ru ON ru.id = f.reporter_id
+         WHERE f.status = $1 ORDER BY f.created_at DESC LIMIT 100`, [status]);
+      res.json(r.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Mark a flag handled (after warning/suspending, or if it's nothing)
+  router.post('/flags/:id/done', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      await pool.query("UPDATE flags SET status = 'reviewed', reviewed_at = NOW() WHERE id = $1", [parseInt(req.params.id, 10)]);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Restore a suspended account (their closed jobs / pulled bids stay closed)
   router.post('/users/:id/restore', authMiddleware, adminOnly, async (req, res) => {
     try {
