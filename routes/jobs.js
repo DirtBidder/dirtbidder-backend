@@ -14,9 +14,11 @@ module.exports = (pool, authMiddleware) => {
       const siteAddress = typeof req.body.site_address === 'string' ? req.body.site_address.trim().slice(0, 500) || null : null;
       if (!title) return res.status(400).json({ error: 'Title is required' });
 
-      // Jobs from test accounts (emails containing "+test") are hidden from operators
-      const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
-      const isTest = u.rows[0] && /\+test/i.test(u.rows[0].email || '');
+      const u = await pool.query('SELECT email, role FROM users WHERE id = $1', [req.user.id]);
+      if (u.rows[0] && u.rows[0].role === 'operator')
+        return res.status(403).json({ error: 'Operator accounts can’t post jobs. Sign in with a client account to post a job.' });
+      // Jobs from test accounts (emails with "+test" or "+op") are hidden from real operators
+      const isTest = u.rows[0] && /\+(test|op)\d*@/i.test(u.rows[0].email || '');
       // Public job text can't carry phone numbers/emails (those go in the private address field)
       const scan = scanFields({ title, description });
       const result = await pool.query(
@@ -70,8 +72,8 @@ module.exports = (pool, authMiddleware) => {
            FROM jobs j
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
            LEFT JOIN users cu ON cu.id = j.client_id
-           WHERE j.status = 'open'
-              OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')}))
+           WHERE j.client_id <> $1 AND (j.status = 'open'
+              OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')})))
            ORDER BY j.created_at DESC`,
           [req.user.id, isTest, myEmail]
         );

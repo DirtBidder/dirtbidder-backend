@@ -351,6 +351,10 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // Jobs posted by test accounts (+test / +op emails) must never be public
+    const hiddenTests = await pool.query(
+      "UPDATE jobs SET status = 'test' WHERE status = 'open' AND client_id IN (SELECT id FROM users WHERE email ~* '\\+(test|op)[0-9]*@') RETURNING id");
+    if (hiddenTests.rowCount) console.log('Hid test-account jobs:', hiddenTests.rows.map(r => r.id).join(','));
     // One-time fix (Sep 29 2026): admin account daniel@dirtbidder.com was created under the name "John Timms".
     // Rename it, and hide any job it posted while testing so operators don't see it as real.
     const fixed = await pool.query(
