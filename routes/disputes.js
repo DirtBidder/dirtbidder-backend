@@ -132,6 +132,45 @@ module.exports = (pool, authMiddleware, adminOnly) => {
   });
 
   // Decide a dispute: release (operator gets paid), refund (client gets everything back), or split
+  // Admin: paid jobs with money currently held (not disputed) — for cancellations both sides agreed to
+  router.get('/admin/escrows', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query(
+        `SELECT e.id, e.job_id, e.amount, e.client_total, e.created_at, j.title, j.status AS job_status,
+                cu.name AS client_name, cu.email AS client_email,
+                COALESCE(NULLIF(ou.company_name, ''), ou.name) AS operator_name, ou.email AS operator_email
+         FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id
+         JOIN users cu ON cu.id = j.client_id
+         LEFT JOIN bids b ON b.id = e.bid_id LEFT JOIN users ou ON ou.id = b.operator_id
+         WHERE e.status = 'held' ORDER BY e.created_at DESC`);
+      res.json(r.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Admin: cancel a paid job both sides agreed to cancel — full refund to the client, fee included
+  router.post('/admin/escrows/:id/cancel', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query('SELECT * FROM escrow_transactions WHERE id = $1', [req.params.id]);
+      const e = r.rows[0];
+      if (!e) return res.status(404).json({ error: 'Payment not found' });
+      if (e.status !== 'held') return res.status(400).json({ error: 'This payment isn’t held anymore (it was released, refunded or is in a dispute)' });
+      if (!stripe || !e.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
+      const refund = await stripe.refunds.create(
+        { payment_intent: e.stripe_payment_intent_id, amount: Math.round(Number(e.client_total) * 100), metadata: { escrow_id: String(e.id), reason: 'cancelled_by_agreement' } },
+        { idempotencyKey: 'cancel-refund-' + e.id });
+      await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, e.id]);
+      await pool.query("UPDATE jobs SET status = 'cancelled' WHERE id = $1", [e.job_id]);
+      notify.cancelledByAgreement(pool, e.job_id, Number(e.client_total));
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Cancel refund error:', err.message);
+      res.status(500).json({ error: err.message && err.type ? 'Stripe: ' + err.message : 'Server error' });
+    }
+  });
+
   router.post('/admin/:id/resolve', authMiddleware, adminOnly, async (req, res) => {
     try {
       const { resolution, operator_amount, note } = req.body;

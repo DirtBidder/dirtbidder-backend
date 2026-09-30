@@ -154,6 +154,25 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Client takes a job down before hiring anyone (free). Pending bids are declined.
+  router.post('/:id/close', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id, status FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['open', 'test'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job already has a hired operator. Contact support@dirtbidder.com to cancel it.' });
+      const pay = await pool.query("SELECT 1 FROM escrow_transactions WHERE job_id = $1 AND status IN ('held', 'pending_payment') AND stripe_payment_intent_id IS NOT NULL", [req.params.id]);
+      if (pay.rows.length) return res.status(400).json({ error: 'A payment is in progress on this job. Contact support@dirtbidder.com.' });
+      const declined = await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND status = 'pending' RETURNING operator_id", [req.params.id]);
+      await pool.query("UPDATE jobs SET status = 'closed' WHERE id = $1", [req.params.id]);
+      require('../lib/notify').jobClosed(pool, req.params.id, declined.rows.map(r => r.operator_id));
+      res.json({ status: 'closed' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Client adds or changes the exact job-site address (private: only the hired operator ever sees it)
   router.put('/:id/address', authMiddleware, async (req, res) => {
     try {
