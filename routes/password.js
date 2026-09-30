@@ -15,9 +15,9 @@ module.exports = (pool) => {
     if (!email.includes('@')) return;
     try {
       const u = await pool.query('SELECT id, email, name FROM users WHERE lower(email) = $1', [email]);
-      if (!u.rows[0]) return;
+      if (!u.rows[0]) { console.log('[forgot] no account for', email); return; }
       const recent = await pool.query("SELECT COUNT(*)::int AS n FROM password_resets WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'", [u.rows[0].id]);
-      if (recent.rows[0].n >= 3) return;
+      if (recent.rows[0].n >= 3) { console.log('[forgot] rate limited', email); return; }
       const token = crypto.randomBytes(32).toString('hex');
       await pool.query("INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')", [u.rows[0].id, hash(token)]);
       await sendEmail(u.rows[0].email, {
