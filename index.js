@@ -421,12 +421,13 @@ async function runMigrations() {
 }
 runMigrations().then(() => require('./lib/hq').migrate(pool)).then(() => {
   // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours,
-  // and send the owner's morning report once a day (from 7am Central)
+  // check bank payments that are still clearing, and send the owner's morning report once a day (from 7am Central)
   const { autoReleaseDueJobs } = require('./lib/release');
   const hq = require('./lib/hq');
   const tick = () => {
     autoReleaseDueJobs(pool).catch(err => console.error('Auto-release error:', err.message));
     hq.reportTick(pool).catch(err => console.error('Daily report error:', err.message));
+    require('./lib/funding').checkProcessing(pool).catch(err => console.error('Bank payment check error:', err.message));
   };
   tick();
   setInterval(tick, 15 * 60 * 1000);

@@ -125,7 +125,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
              (SELECT COUNT(*) FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
                 WHERE date_trunc('week', b.created_at) = w.wk AND ${realJob('j', 'c')} AND ${realUser('o')})::int AS bids,
              (SELECT COALESCE(SUM(e.amount), 0) FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
-                WHERE date_trunc('week', e.created_at) = w.wk AND e.status NOT IN ('pending_payment', 'cancelled') AND ${realJob('j', 'c')})::float AS paid_in
+                WHERE date_trunc('week', e.created_at) = w.wk AND e.status NOT IN ('pending_payment', 'cancelled', 'processing', 'failed') AND ${realJob('j', 'c')})::float AS paid_in
            FROM w ORDER BY w.wk`, p),
         pool.query(
           `SELECT * FROM (
@@ -140,7 +140,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
              UNION ALL
              SELECT 'payment', e.created_at, c.name, j.title, e.amount
                FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
-               WHERE e.status NOT IN ('pending_payment', 'cancelled') AND ${realJob('j', 'c')}
+               WHERE e.status NOT IN ('pending_payment', 'cancelled', 'processing', 'failed') AND ${realJob('j', 'c')}
              UNION ALL
              SELECT 'dispute', d.created_at, c.name, j.title, NULL FROM disputes d JOIN jobs j ON j.id = d.job_id JOIN users c ON c.id = j.client_id
                WHERE ${realJob('j', 'c')}

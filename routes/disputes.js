@@ -125,7 +125,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
                   SUM(e.operator_fee) AS operator_fee, SUM(e.operator_payout) AS operator_payout,
                   COUNT(*) FILTER (WHERE e.change_order_id IS NOT NULL)::int AS change_orders
            FROM escrow_transactions e
-           WHERE e.job_id = d.job_id AND e.status NOT IN ('pending_payment', 'cancelled')
+           WHERE e.job_id = d.job_id AND e.status NOT IN ('pending_payment', 'cancelled', 'processing', 'failed')
              AND (e.id = d.escrow_id OR e.change_order_id IS NOT NULL)) t ON true
          ORDER BY (d.status = 'open') DESC, d.created_at DESC
          LIMIT 200`

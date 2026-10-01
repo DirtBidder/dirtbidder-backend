@@ -204,7 +204,7 @@ module.exports = (pool, authMiddleware) => {
       const job = result.rows[0];
       if (job.client_id !== req.user.id) {
         const hired = await pool.query("SELECT 1 FROM bids WHERE job_id = $1 AND operator_id = $2 AND status = 'accepted'", [job.id, req.user.id]);
-        if (hired.rows.length === 0) delete job.site_address;
+        if (hired.rows.length === 0 || job.status === 'funding') delete job.site_address;
       }
       res.json(job);
     } catch (err) {

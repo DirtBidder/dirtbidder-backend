@@ -3,6 +3,7 @@ const { scanFields, addFlag } = require('../lib/flags');
 const router = express.Router();
 const { stripeFor, FRONTEND_URL, isLive } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
+const { createCheckout } = require('../lib/funding');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
 
@@ -61,9 +62,9 @@ module.exports = (pool, authMiddleware) => {
                 j.completed_at AS job_completed_at,
                 (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note
                    FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
-                CASE WHEN b.status = 'accepted' THEN cu.name END AS client_name,
-                CASE WHEN b.status = 'accepted' THEN cu.phone END AS client_phone,
-                CASE WHEN b.status = 'accepted' THEN j.site_address END AS job_address
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN cu.name END AS client_name,
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN cu.phone END AS client_phone,
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN j.site_address END AS job_address
          FROM bids b
          JOIN jobs j ON j.id = b.job_id
          LEFT JOIN users cu ON cu.id = j.client_id
@@ -125,7 +126,7 @@ module.exports = (pool, authMiddleware) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment', $8) RETURNING id`,
         [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout, testJob]
       );
-      const session = await stripe.checkout.sessions.create({
+      const session = await (async () => { try { return await createCheckout(stripe, {
         mode: 'payment',
         line_items: [
           { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.job_amount * 100), product_data: { name: title.slice(0, 250), description: 'Held in escrow until you release it' } } },
@@ -134,11 +135,15 @@ module.exports = (pool, authMiddleware) => {
         metadata: { escrow_id: String(esc.rows[0].id), bid_id: String(bid.id), job_id: String(bid.job_id), client_id: String(req.user.id) },
         success_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?session_id={CHECKOUT_SESSION_ID}',
         cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?payment=cancelled'
-      });
+      }, f.job_amount); } catch (err) {
+        await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE id = $1", [esc.rows[0].id]);
+        throw err;
+      } })();
       await pool.query('UPDATE escrow_transactions SET stripe_session_id = $1 WHERE id = $2', [session.id, esc.rows[0].id]);
       res.json({ checkout_url: session.url });
     } catch (err) {
       console.error(err);
+      if (err.userMessage) return res.status(400).json({ error: err.userMessage });
       res.status(500).json({ error: 'Server error' });
     }
   });

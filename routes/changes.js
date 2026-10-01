@@ -11,6 +11,7 @@ const { stripeFor, isLive, FRONTEND_URL } = require('../lib/stripe');
 const { feePerSide } = require('../utils/fees');
 const { scanText, addFlag } = require('../lib/flags');
 const notify = require('../lib/notify');
+const { createCheckout, settleSession } = require('../lib/funding');
 
 const MAX_EXTRA = 5000000;
 const round2 = n => Math.round(Number(n) * 100) / 100;
@@ -21,7 +22,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
     const r = await pool.query(
       `SELECT j.id, j.title, j.status, j.client_id, b.operator_id, b.amount AS bid_amount,
               (SELECT COALESCE(SUM(e.amount), 0) FROM escrow_transactions e
-                 WHERE e.job_id = j.id AND e.status NOT IN ('pending_payment', 'cancelled', 'refunded', 'refund_needed'))::float AS committed
+                 WHERE e.job_id = j.id AND e.status NOT IN ('pending_payment', 'cancelled', 'refunded', 'refund_needed', 'failed'))::float AS committed
        FROM jobs j LEFT JOIN bids b ON b.job_id = j.id AND b.status = 'accepted'
        WHERE j.id = $1`, [jobId]);
     return r.rows[0] || null;
@@ -61,7 +62,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
       if (!(amount >= 1 && amount <= MAX_EXTRA)) return res.status(400).json({ error: 'Enter the extra amount in dollars' });
       const raw = String(req.body.reason || '').trim().slice(0, 2000);
       if (raw.length < 10) return res.status(400).json({ error: 'Explain what changed and why (a sentence or two)' });
-      const open = await pool.query("SELECT id FROM change_orders WHERE job_id = $1 AND status IN ('pending', 'paying')", [j.id]);
+      const open = await pool.query("SELECT id FROM change_orders WHERE job_id = $1 AND status IN ('pending', 'paying', 'processing')", [j.id]);
       if (open.rows.length) return res.status(400).json({ error: 'There is already a change request waiting on the client' });
 
       // Same rules as messages before hire: no contact info / payment-outside talk in the request
@@ -154,7 +155,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
 
       // Same Stripe mode as the job's original payment (test jobs stay in test mode)
       const orig = await pool.query(
-        "SELECT test_mode FROM escrow_transactions WHERE job_id = $1 AND change_order_id IS NULL AND status NOT IN ('pending_payment', 'cancelled') ORDER BY id LIMIT 1", [co.job_id]);
+        "SELECT test_mode FROM escrow_transactions WHERE job_id = $1 AND change_order_id IS NULL AND status NOT IN ('pending_payment', 'cancelled', 'processing', 'failed') ORDER BY id LIMIT 1", [co.job_id]);
       const testJob = orig.rows[0] ? !!orig.rows[0].test_mode : false;
       if (!testJob && !isLive) return res.status(503).json({ payments_paused: true, error: 'Payments open soon. We’ll email you when you can approve this.' });
       const stripe = stripeFor(testJob);
@@ -177,7 +178,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
         `INSERT INTO escrow_transactions (job_id, bid_id, change_order_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode)
          VALUES ($1, $2, $3, $4, $5, $5, $6, $7, 'pending_payment', $8) RETURNING id`,
         [co.job_id, co.bid_id, co.id, amount, fee, round2(amount + fee), round2(amount - fee), testJob]);
-      const session = await stripe.checkout.sessions.create({
+      const session = await (async () => { try { return await createCheckout(stripe, {
         mode: 'payment',
         line_items: [
           { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(amount * 100), product_data: { name: ('Change order: ' + (co.title || 'DirtBidder job')).slice(0, 250), description: 'Added to the job. Held in escrow until you release it' } } },
@@ -186,12 +187,16 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
         metadata: { escrow_id: String(esc.rows[0].id), change_order_id: String(co.id), job_id: String(co.job_id), client_id: String(req.user.id) },
         success_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co_session={CHECKOUT_SESSION_ID}',
         cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co=cancelled'
-      });
+      }, amount); } catch (err) {
+        await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE id = $1", [esc.rows[0].id]);
+        throw err;
+      } })();
       await pool.query('UPDATE escrow_transactions SET stripe_session_id = $1 WHERE id = $2', [session.id, esc.rows[0].id]);
       await pool.query("UPDATE change_orders SET status = 'paying' WHERE id = $1", [co.id]);
       res.json({ checkout_url: session.url });
     } catch (err) {
       console.error(err);
+      if (err.userMessage) return res.status(400).json({ error: err.userMessage });
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -209,19 +214,10 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
       if (e.status !== 'pending_payment') return res.json({ status: e.status });
       const stripe = stripeFor(!!e.test_mode);
       const session = await stripe.checkout.sessions.retrieve(sessionId);
-      if (session.payment_status !== 'paid') return res.status(400).json({ error: 'Payment not completed' });
-      const co = await pool.query('SELECT status FROM change_orders WHERE id = $1', [e.change_order_id]);
-      if (!co.rows[0] || !['pending', 'paying'].includes(co.rows[0].status)) {
-        await pool.query("UPDATE escrow_transactions SET status = 'refund_needed', stripe_payment_intent_id = $1 WHERE id = $2", [session.payment_intent, e.id]);
-        return res.status(409).json({ error: 'That change request was closed. Your payment will be refunded.' });
-      }
-      // Held like the rest of the job; if the job is already in a dispute, it's frozen with it
-      const job = await pool.query('SELECT status FROM jobs WHERE id = $1', [e.job_id]);
-      const holdStatus = job.rows[0] && job.rows[0].status === 'disputed' ? 'disputed' : 'held';
-      await pool.query('UPDATE escrow_transactions SET status = $1, stripe_payment_intent_id = $2 WHERE id = $3', [holdStatus, session.payment_intent, e.id]);
-      await pool.query("UPDATE change_orders SET status = 'paid', decided_at = COALESCE(decided_at, NOW()), paid_at = NOW() WHERE id = $1", [e.change_order_id]);
-      notify.changeDecided(pool, e.change_order_id);
-      res.json({ status: 'paid' });
+      const out = await settleSession(pool, e, session);
+      if (!out) return res.status(400).json({ error: 'Payment not completed' });
+      if (out.error) return res.status(409).json(out);
+      res.json(out); // { status: 'paid' } for card, { status: 'processing' } for bank
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });

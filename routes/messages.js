@@ -31,9 +31,11 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
     else if (await isAdmin(userId)) t.me = 'admin';
     else return null;
     t.operator_id = operatorId;
-    t.hired = t.hired_operator_id === operatorId;
+    const picked = t.hired_operator_id === operatorId;
+    // Contact info stays hidden until the hire is paid (a bank payment that is still clearing doesn't count yet)
+    t.hired = picked && t.job_status !== 'funding';
     // Sending closes once someone else was hired, or the job was closed/cancelled without this operator
-    t.can_send = t.me !== 'admin' && (t.hired || (!t.hired_operator_id && ['open', 'test'].includes(t.job_status) && t.bid_status !== 'withdrawn'));
+    t.can_send = t.me !== 'admin' && (picked || (!t.hired_operator_id && ['open', 'test'].includes(t.job_status) && t.bid_status !== 'withdrawn'));
     t.closed_reason = t.can_send || t.me === 'admin' ? null
       : t.hired_operator_id ? 'This job went to another operator, so this conversation is closed.'
       : t.bid_status === 'withdrawn' ? 'This bid was withdrawn, so this conversation is closed.'

@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { stripe, stripeFor, isTestMode, isLive } = require('../lib/stripe');
-const { hireBid } = require('../lib/hire');
-const notify = require('../lib/notify');
+const { settleSession, checkProcessing } = require('../lib/funding');
+
+// Bank payments still clearing are re-checked when a dashboard loads (at most every 30s per person)
+const lastCheck = new Map();
 
 module.exports = (pool, authMiddleware) => {
   // Is escrow switched on? (front end uses this to word things)
@@ -24,23 +26,10 @@ module.exports = (pool, authMiddleware) => {
       const stripe = stripeFor(!!e.test_mode);
       if (!stripe) return res.status(503).json({ error: 'Payments are not set up yet' });
       const session = await stripe.checkout.sessions.retrieve(session_id);
-      if (session.payment_status !== 'paid') return res.status(400).json({ error: 'Payment not completed' });
-
-      const bid = await pool.query('SELECT * FROM bids WHERE id = $1', [e.bid_id]);
-      if (!bid.rows[0] || bid.rows[0].status !== 'pending') {
-        // Bid no longer available after paying: flag for refund
-        await pool.query("UPDATE escrow_transactions SET status = 'refund_needed', stripe_payment_intent_id = $1 WHERE id = $2", [session.payment_intent, e.id]);
-        return res.status(409).json({ error: 'That bid is no longer available. Your payment will be refunded.' });
-      }
-      await hireBid(pool, bid.rows[0]);
-      await pool.query(
-        "UPDATE escrow_transactions SET status = 'held', stripe_payment_intent_id = $1 WHERE id = $2",
-        [session.payment_intent, e.id]
-      );
-      // Any other unpaid checkouts on this job are void
-      await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE job_id = $1 AND id <> $2 AND status = 'pending_payment'", [e.job_id, e.id]);
-      notify.hired(pool, e.job_id);
-      res.json({ status: 'held' });
+      const out = await settleSession(pool, e, session);
+      if (!out) return res.status(400).json({ error: 'Payment not completed' });
+      if (out.error) return res.status(409).json(out);
+      res.json(out); // { status: 'held' } for card, { status: 'processing' } for bank
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
@@ -50,6 +39,11 @@ module.exports = (pool, authMiddleware) => {
   // Escrow records for the logged-in user (client: their jobs, operator: jobs they were hired for)
   router.get('/mine', authMiddleware, async (req, res) => {
     try {
+      const now = Date.now();
+      if (now - (lastCheck.get(req.user.id) || 0) > 30000) {
+        lastCheck.set(req.user.id, now);
+        await checkProcessing(pool, { userId: req.user.id }).catch(err => console.error('Bank check error:', err.message));
+      }
       const result = await pool.query(
         `SELECT e.id, e.job_id, e.amount, e.client_fee, e.operator_fee, e.client_total, e.operator_payout,
                 e.status, e.change_order_id, e.created_at, e.released_at, e.paid_out_at, (e.stripe_transfer_id IS NOT NULL) AS paid_out,
@@ -57,7 +51,7 @@ module.exports = (pool, authMiddleware) => {
          FROM escrow_transactions e
          JOIN jobs j ON j.id = e.job_id
          LEFT JOIN bids b ON b.id = e.bid_id
-         WHERE e.status IN ('held', 'released', 'refund_needed', 'disputed', 'refunded')
+         WHERE e.status IN ('processing', 'held', 'released', 'refund_needed', 'disputed', 'refunded', 'failed')
            AND (j.client_id = $1 OR b.operator_id = $1)
          ORDER BY e.created_at DESC`,
         [req.user.id]
