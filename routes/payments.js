@@ -6,7 +6,7 @@ const notify = require('../lib/notify');
 
 module.exports = (pool, authMiddleware) => {
   // Is escrow switched on? (front end uses this to word things)
-  router.get('/status', (req, res) => res.json({ enabled: !!stripe, test_mode: isTestMode }));
+  router.get('/status', (req, res) => res.json({ enabled: !!stripe, test_mode: isTestMode, live: !!stripe && !isTestMode }));
 
   // After Stripe Checkout: confirm the client paid, then hire the operator and mark funds held.
   router.post('/confirm', authMiddleware, async (req, res) => {

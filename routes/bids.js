@@ -1,7 +1,7 @@
 const express = require('express');
 const { scanFields, addFlag } = require('../lib/flags');
 const router = express.Router();
-const { stripe, FRONTEND_URL } = require('../lib/stripe');
+const { stripe, FRONTEND_URL, isTestMode } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
@@ -91,6 +91,19 @@ module.exports = (pool, authMiddleware) => {
       if (bid.client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       if (!['open', 'test'].includes(bid.job_status)) return res.status(400).json({ error: 'This job already has a hired operator' });
       if (bid.status !== 'pending') return res.status(400).json({ error: 'This bid is no longer available' });
+
+      // Until Stripe is LIVE, real jobs can't be hired (test jobs still can, so the flow can be tried).
+      // The client goes on a waitlist and gets an email when payments open.
+      if (bid.job_status !== 'test' && !(stripe && !isTestMode)) {
+        const added = await pool.query(
+          'INSERT INTO payment_waitlist (bid_id, user_id, job_id) VALUES ($1, $2, $3) ON CONFLICT (bid_id) DO NOTHING RETURNING id',
+          [bid.id, req.user.id, bid.job_id]);
+        if (added.rows.length) notify.paymentsWaitlist(pool, bid.id);
+        return res.status(503).json({
+          payments_paused: true,
+          error: "Payments open soon. We're finishing our secure escrow setup. Your job and this bid are saved — we'll email you as soon as you can hire."
+        });
+      }
 
       // Payments not set up yet: hire right away (no escrow)
       if (!stripe) {

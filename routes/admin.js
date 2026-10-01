@@ -115,7 +115,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
            WHERE ${realJob('j', 'c')}`, p),
         pool.query(
           `SELECT (SELECT COUNT(*) FROM disputes WHERE status = 'open')::int AS disputes,
-                  (SELECT COUNT(*) FROM flags WHERE status = 'open')::int AS flags`),
+                  (SELECT COUNT(*) FROM flags WHERE status = 'open')::int AS flags,
+                  (SELECT COUNT(*) FROM payment_waitlist WHERE notified_at IS NULL)::int AS waiting_to_pay`),
         pool.query(
           `WITH w AS (SELECT generate_series(date_trunc('week', NOW()) - INTERVAL '7 weeks', date_trunc('week', NOW()), INTERVAL '1 week') AS wk)
            SELECT to_char(w.wk, 'YYYY-MM-DD') AS week,
