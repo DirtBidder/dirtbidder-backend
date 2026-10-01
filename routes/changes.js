@@ -185,7 +185,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
         ],
         metadata: { escrow_id: String(esc.rows[0].id), change_order_id: String(co.id), job_id: String(co.job_id), client_id: String(req.user.id) },
         success_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co_session={CHECKOUT_SESSION_ID}',
-        cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?payment=cancelled'
+        cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co=cancelled'
       });
       await pool.query('UPDATE escrow_transactions SET stripe_session_id = $1 WHERE id = $2', [session.id, esc.rows[0].id]);
       await pool.query("UPDATE change_orders SET status = 'paying' WHERE id = $1", [co.id]);
