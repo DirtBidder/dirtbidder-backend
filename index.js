@@ -378,7 +378,12 @@ async function runMigrations() {
        )`,
       "CREATE INDEX IF NOT EXISTS change_orders_job_idx ON change_orders (job_id)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
-      "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)"
+      "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
+      // One-time cleanup: test-account jobs left "in progress" from before payments existed (never funded)
+      `UPDATE jobs j SET status = 'closed' FROM users c
+       WHERE c.id = j.client_id AND c.email ~* '\\+(test|op)[0-9]*@' AND j.status = 'in_progress'
+         AND j.title ILIKE 'I need a pond excavated%'
+         AND NOT EXISTS (SELECT 1 FROM escrow_transactions e WHERE e.job_id = j.id AND e.status NOT IN ('pending_payment', 'cancelled'))`
     ];
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
