@@ -186,8 +186,8 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
         ],
         metadata: { escrow_id: String(esc.rows[0].id), change_order_id: String(co.id), job_id: String(co.job_id), client_id: String(req.user.id) },
         success_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co_session={CHECKOUT_SESSION_ID}',
-        cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co=cancelled'
-      }, amount); } catch (err) {
+        cancel_url: FRONTEND_URL + '/dirtbidder-client-dashboard.html?co=cancelled&e=' + esc.rows[0].id
+      }, amount, { pool, jobId: co.job_id }); } catch (err) {
         await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE id = $1", [esc.rows[0].id]);
         throw err;
       } })();

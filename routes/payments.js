@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { stripe, stripeFor, isTestMode, isLive } = require('../lib/stripe');
-const { settleSession, checkProcessing } = require('../lib/funding');
+const { settleSession, checkProcessing, checkoutAbandoned } = require('../lib/funding');
 
 // Bank payments still clearing are re-checked when a dashboard loads (at most every 30s per person)
 const lastCheck = new Map();
@@ -33,6 +33,20 @@ module.exports = (pool, authMiddleware) => {
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Client came back from Checkout without paying (cancelled, or Stripe refused it). Body: { escrow_id }
+  router.post('/abandoned', authMiddleware, async (req, res) => {
+    try {
+      const r = await pool.query(
+        'SELECT e.*, j.client_id FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id WHERE e.id = $1', [parseInt(req.body.escrow_id, 10) || 0]);
+      const e = r.rows[0];
+      if (!e || e.client_id !== req.user.id) return res.json({ limit: false });
+      res.json(await checkoutAbandoned(pool, e));
+    } catch (err) {
+      console.error(err);
+      res.json({ limit: false });
     }
   });
 
