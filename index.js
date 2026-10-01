@@ -187,6 +187,7 @@ app.post('/api/track', (req, res) => {
   res.status(204).end();
 });
 app.use('/api/admin', require('./routes/admin')(pool, authMiddleware, adminOnly, ADMIN_EMAILS));
+app.use('/api/changes', require('./routes/changes')(pool, authMiddleware, ADMIN_EMAILS));
 app.use('/api/messages', require('./routes/messages')(pool, authMiddleware, ADMIN_EMAILS));
 app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, adminOnly));
 
@@ -357,7 +358,27 @@ async function runMigrations() {
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS test_mode BOOLEAN",
       "UPDATE escrow_transactions SET test_mode = true WHERE test_mode IS NULL",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_account_test BOOLEAN",
-      "UPDATE users SET stripe_account_test = true WHERE stripe_account_id IS NOT NULL AND stripe_account_test IS NULL"
+      "UPDATE users SET stripe_account_test = true WHERE stripe_account_id IS NOT NULL AND stripe_account_test IS NULL",
+      // Change orders: extra money on a job, requested by the operator and approved/paid by the client
+      `CREATE TABLE IF NOT EXISTS change_orders (
+         id SERIAL PRIMARY KEY,
+         job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+         operator_id INTEGER NOT NULL REFERENCES users(id),
+         amount DECIMAL(12,2) NOT NULL,
+         reason TEXT NOT NULL,
+         client_fee DECIMAL(12,2),
+         operator_fee DECIMAL(12,2),
+         client_total DECIMAL(12,2),
+         operator_payout DECIMAL(12,2),
+         status VARCHAR(20) NOT NULL DEFAULT 'pending',
+         client_note TEXT,
+         decided_at TIMESTAMP,
+         paid_at TIMESTAMP,
+         created_at TIMESTAMP DEFAULT NOW()
+       )`,
+      "CREATE INDEX IF NOT EXISTS change_orders_job_idx ON change_orders (job_id)",
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
+      "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)"
     ];
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }

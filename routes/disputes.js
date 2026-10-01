@@ -23,14 +23,14 @@ module.exports = (pool, authMiddleware, adminOnly) => {
           Date.now() - new Date(job.completed_at).getTime() > AUTO_RELEASE_HOURS * 3600 * 1000) {
         return res.status(400).json({ error: 'The 72-hour window to report a problem has passed' });
       }
-      const esc = await pool.query("SELECT id FROM escrow_transactions WHERE job_id = $1 AND status = 'held' LIMIT 1", [req.params.id]);
+      const esc = await pool.query("SELECT id FROM escrow_transactions WHERE job_id = $1 AND status = 'held' ORDER BY (change_order_id IS NOT NULL), id LIMIT 1", [req.params.id]);
       if (esc.rows.length === 0) return res.status(400).json({ error: 'There is no payment held for this job' });
 
       const d = await pool.query(
         `INSERT INTO disputes (job_id, escrow_id, opened_by, reason, previous_job_status) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [req.params.id, esc.rows[0].id, req.user.id, reason.slice(0, 4000), job.status]
       );
-      await pool.query("UPDATE escrow_transactions SET status = 'disputed' WHERE id = $1", [esc.rows[0].id]);
+      await pool.query("UPDATE escrow_transactions SET status = 'disputed' WHERE job_id = $1 AND status = 'held'", [req.params.id]);
       await pool.query("UPDATE jobs SET status = 'disputed' WHERE id = $1", [req.params.id]);
       // Give the client a moment to upload photos before the admin email goes out
       setTimeout(() => notify.disputeOpened(pool, d.rows[0].id), 60 * 1000);
@@ -113,14 +113,20 @@ module.exports = (pool, authMiddleware, adminOnly) => {
         `SELECT d.*, j.title AS job_title, j.location AS job_location, j.completed_at AS job_completed_at,
                 cu.name AS client_name, cu.email AS client_email,
                 COALESCE(NULLIF(ou.company_name, ''), ou.name) AS operator_name, ou.email AS operator_email,
-                e.amount AS escrow_amount, e.client_fee, e.client_total, e.operator_fee, e.operator_payout,
+                t.amount AS escrow_amount, t.client_fee, t.client_total, t.operator_fee, t.operator_payout, t.change_orders,
                 (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.dispute_id = d.id) AS photos
          FROM disputes d
          JOIN jobs j ON j.id = d.job_id
          JOIN users cu ON cu.id = j.client_id
          LEFT JOIN bids b ON b.job_id = j.id AND b.status = 'accepted'
          LEFT JOIN users ou ON ou.id = b.operator_id
-         LEFT JOIN escrow_transactions e ON e.id = d.escrow_id
+         LEFT JOIN LATERAL (
+           SELECT SUM(e.amount) AS amount, SUM(e.client_fee) AS client_fee, SUM(e.client_total) AS client_total,
+                  SUM(e.operator_fee) AS operator_fee, SUM(e.operator_payout) AS operator_payout,
+                  COUNT(*) FILTER (WHERE e.change_order_id IS NOT NULL)::int AS change_orders
+           FROM escrow_transactions e
+           WHERE e.job_id = d.job_id AND e.status NOT IN ('pending_payment', 'cancelled')
+             AND (e.id = d.escrow_id OR e.change_order_id IS NOT NULL)) t ON true
          ORDER BY (d.status = 'open') DESC, d.created_at DESC
          LIMIT 200`
       );
@@ -136,13 +142,15 @@ module.exports = (pool, authMiddleware, adminOnly) => {
   router.get('/admin/escrows', authMiddleware, adminOnly, async (req, res) => {
     try {
       const r = await pool.query(
-        `SELECT e.id, e.job_id, e.amount, e.client_total, e.created_at, j.title, j.status AS job_status,
+        `SELECT e.id, e.job_id, e.created_at, j.title, j.status AS job_status,
+                (SELECT SUM(x.amount) FROM escrow_transactions x WHERE x.job_id = e.job_id AND x.status = 'held') AS amount,
+                (SELECT SUM(x.client_total) FROM escrow_transactions x WHERE x.job_id = e.job_id AND x.status = 'held') AS client_total,
                 cu.name AS client_name, cu.email AS client_email,
                 COALESCE(NULLIF(ou.company_name, ''), ou.name) AS operator_name, ou.email AS operator_email
          FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id
          JOIN users cu ON cu.id = j.client_id
          LEFT JOIN bids b ON b.id = e.bid_id LEFT JOIN users ou ON ou.id = b.operator_id
-         WHERE e.status = 'held' ORDER BY e.created_at DESC`);
+         WHERE e.status = 'held' AND e.change_order_id IS NULL ORDER BY e.created_at DESC`);
       res.json(r.rows);
     } catch (err) {
       console.error(err);
@@ -157,14 +165,22 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       const e = r.rows[0];
       if (!e) return res.status(404).json({ error: 'Payment not found' });
       if (e.status !== 'held') return res.status(400).json({ error: 'This payment isn’t held anymore (it was released, refunded or is in a dispute)' });
-      const stripe = stripeFor(!!e.test_mode);
-      if (!stripe || !e.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
-      const refund = await stripe.refunds.create(
-        { payment_intent: e.stripe_payment_intent_id, amount: Math.round(Number(e.client_total) * 100), metadata: { escrow_id: String(e.id), reason: 'cancelled_by_agreement' } },
-        { idempotencyKey: 'cancel-refund-' + e.id });
-      await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, e.id]);
+      // Refund every held payment on the job (the original plus any paid change orders)
+      const all = (await pool.query("SELECT * FROM escrow_transactions WHERE job_id = $1 AND status = 'held' ORDER BY id", [e.job_id])).rows;
+      for (const x of all) {
+        if (!stripeFor(!!x.test_mode) || !x.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
+      }
+      let total = 0;
+      for (const x of all) {
+        const refund = await stripeFor(!!x.test_mode).refunds.create(
+          { payment_intent: x.stripe_payment_intent_id, amount: Math.round(Number(x.client_total) * 100), metadata: { escrow_id: String(x.id), reason: 'cancelled_by_agreement' } },
+          { idempotencyKey: 'cancel-refund-' + x.id });
+        await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, x.id]);
+        total += Number(x.client_total);
+      }
+      await pool.query("UPDATE change_orders SET status = 'withdrawn', decided_at = NOW() WHERE job_id = $1 AND status IN ('pending', 'paying')", [e.job_id]);
       await pool.query("UPDATE jobs SET status = 'cancelled' WHERE id = $1", [e.job_id]);
-      notify.cancelledByAgreement(pool, e.job_id, Number(e.client_total));
+      notify.cancelledByAgreement(pool, e.job_id, Math.round(total * 100) / 100);
       res.json({ ok: true });
     } catch (err) {
       console.error('Cancel refund error:', err.message);
@@ -176,15 +192,17 @@ module.exports = (pool, authMiddleware, adminOnly) => {
     try {
       const { resolution, operator_amount, note } = req.body;
       if (!['release', 'refund', 'split'].includes(resolution)) return res.status(400).json({ error: 'Pick release, refund or split' });
-      const r = await pool.query(
-        `SELECT d.*, e.amount, e.client_total, e.stripe_payment_intent_id, e.test_mode
-         FROM disputes d JOIN escrow_transactions e ON e.id = d.escrow_id WHERE d.id = $1`,
-        [req.params.id]
-      );
+      const r = await pool.query('SELECT * FROM disputes WHERE id = $1', [req.params.id]);
       if (r.rows.length === 0) return res.status(404).json({ error: 'Dispute not found' });
       const d = r.rows[0];
       if (d.status !== 'open') return res.status(400).json({ error: 'Already resolved' });
-      const jobAmount = Number(d.amount);
+      // Every payment frozen on this job: the original one plus any paid change orders (oldest first)
+      const esc = await pool.query(
+        "SELECT * FROM escrow_transactions WHERE job_id = $1 AND status IN ('disputed', 'held') ORDER BY (change_order_id IS NOT NULL), id", [d.job_id]);
+      const escrows = esc.rows;
+      if (!escrows.length) return res.status(400).json({ error: 'No payment is held for this job' });
+      const jobAmount = Math.round(escrows.reduce((n, e) => n + Number(e.amount), 0) * 100) / 100;
+      const clientTotal = Math.round(escrows.reduce((n, e) => n + Number(e.client_total), 0) * 100) / 100;
 
       if (resolution === 'release') {
         await releaseJob(pool, d.job_id);
@@ -196,38 +214,60 @@ module.exports = (pool, authMiddleware, adminOnly) => {
         return res.json({ ok: true });
       }
 
-      const stripe = stripeFor(!!d.test_mode);
-      if (!stripe || !d.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
+      for (const e of escrows) {
+        if (!stripeFor(!!e.test_mode) || !e.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
+      }
 
       if (resolution === 'refund') {
-        // Full refund of what the client paid (job + client fee)
-        const refund = await stripe.refunds.create(
-          { payment_intent: d.stripe_payment_intent_id, amount: Math.round(Number(d.client_total) * 100), metadata: { dispute_id: String(d.id) } },
-          { idempotencyKey: 'dispute-refund-' + d.id }
-        );
-        await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, d.escrow_id]);
+        // Full refund of everything the client paid (job + change orders + client fees)
+        for (const e of escrows) {
+          const refund = await stripeFor(!!e.test_mode).refunds.create(
+            { payment_intent: e.stripe_payment_intent_id, amount: Math.round(Number(e.client_total) * 100), metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
+            { idempotencyKey: 'dispute-refund-' + d.id + '-' + e.id }
+          );
+          await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, e.id]);
+        }
         await pool.query("UPDATE jobs SET status = 'cancelled' WHERE id = $1", [d.job_id]);
         await pool.query(
           "UPDATE disputes SET status = 'resolved', resolution = 'refund', refund_amount = $1, operator_amount = 0, admin_note = $2, resolved_at = NOW(), resolved_by = $3 WHERE id = $4",
-          [Number(d.client_total), note || null, req.user.id, d.id]
+          [clientTotal, note || null, req.user.id, d.id]
         );
         notify.disputeResolved(pool, d.id);
         return res.json({ ok: true });
       }
 
-      // Split: operator is paid for part of the job, client gets the rest of the job amount back
+      // Split: operator is paid opAmt of the total job amount; the client gets the rest of the job amount back.
+      // The operator's share fills the original payment first, then change orders.
       const opAmt = Math.round(Number(operator_amount) * 100) / 100;
       if (!(opAmt > 0 && opAmt < jobAmount)) return res.status(400).json({ error: 'Operator amount must be between $0 and the job amount' });
       const refundAmt = Math.round((jobAmount - opAmt) * 100) / 100;
-      const refund = await stripe.refunds.create(
-        { payment_intent: d.stripe_payment_intent_id, amount: Math.round(refundAmt * 100), metadata: { dispute_id: String(d.id) } },
-        { idempotencyKey: 'dispute-split-' + d.id }
-      );
-      const opFee = feePerSide(opAmt);
-      await pool.query(
-        "UPDATE escrow_transactions SET operator_fee = $1, operator_payout = $2, stripe_refund_id = $3, status = 'released', released_at = NOW() WHERE id = $4",
-        [opFee, Math.round((opAmt - opFee) * 100) / 100, refund.id, d.escrow_id]
-      );
+      const opFeeTotal = feePerSide(opAmt);
+      let left = opAmt, feeLeft = opFeeTotal;
+      for (let i = 0; i < escrows.length; i++) {
+        const e = escrows[i], amt = Number(e.amount);
+        const opPart = Math.round(Math.min(left, amt) * 100) / 100;
+        left = Math.round((left - opPart) * 100) / 100;
+        const refundPart = Math.round((amt - opPart) * 100) / 100;
+        let refundId = null;
+        if (refundPart > 0) {
+          const refund = await stripeFor(!!e.test_mode).refunds.create(
+            { payment_intent: e.stripe_payment_intent_id, amount: Math.round(refundPart * 100), metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
+            { idempotencyKey: 'dispute-split-' + d.id + '-' + e.id }
+          );
+          refundId = refund.id;
+        }
+        if (opPart > 0) {
+          // Operator fee shared across payments in proportion to the operator's part (last one takes the rounding)
+          const isLastPaid = left <= 0;
+          const fee = isLastPaid ? feeLeft : Math.round(opFeeTotal * opPart / opAmt * 100) / 100;
+          feeLeft = Math.round((feeLeft - fee) * 100) / 100;
+          await pool.query(
+            "UPDATE escrow_transactions SET operator_fee = $1, operator_payout = $2, stripe_refund_id = $3, status = 'released', released_at = NOW() WHERE id = $4",
+            [fee, Math.round((opPart - fee) * 100) / 100, refundId, e.id]);
+        } else {
+          await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refundId, e.id]);
+        }
+      }
       await pool.query("UPDATE jobs SET status = 'completed', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1", [d.job_id]);
       await pool.query(
         "UPDATE disputes SET status = 'resolved', resolution = 'split', refund_amount = $1, operator_amount = $2, admin_note = $3, resolved_at = NOW(), resolved_by = $4 WHERE id = $5",
