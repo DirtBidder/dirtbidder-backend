@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-const { stripe } = require('../lib/stripe');
+const { stripeFor } = require('../lib/stripe');
 const { feePerSide } = require('../utils/fees');
 const { releaseJob, AUTO_RELEASE_HOURS } = require('../lib/release');
 const { payPendingPayouts } = require('../lib/payouts');
@@ -157,6 +157,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       const e = r.rows[0];
       if (!e) return res.status(404).json({ error: 'Payment not found' });
       if (e.status !== 'held') return res.status(400).json({ error: 'This payment isn’t held anymore (it was released, refunded or is in a dispute)' });
+      const stripe = stripeFor(!!e.test_mode);
       if (!stripe || !e.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
       const refund = await stripe.refunds.create(
         { payment_intent: e.stripe_payment_intent_id, amount: Math.round(Number(e.client_total) * 100), metadata: { escrow_id: String(e.id), reason: 'cancelled_by_agreement' } },
@@ -176,7 +177,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       const { resolution, operator_amount, note } = req.body;
       if (!['release', 'refund', 'split'].includes(resolution)) return res.status(400).json({ error: 'Pick release, refund or split' });
       const r = await pool.query(
-        `SELECT d.*, e.amount, e.client_total, e.stripe_payment_intent_id
+        `SELECT d.*, e.amount, e.client_total, e.stripe_payment_intent_id, e.test_mode
          FROM disputes d JOIN escrow_transactions e ON e.id = d.escrow_id WHERE d.id = $1`,
         [req.params.id]
       );
@@ -195,6 +196,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
         return res.json({ ok: true });
       }
 
+      const stripe = stripeFor(!!d.test_mode);
       if (!stripe || !d.stripe_payment_intent_id) return res.status(400).json({ error: 'No card payment to refund on this job' });
 
       if (resolution === 'refund') {

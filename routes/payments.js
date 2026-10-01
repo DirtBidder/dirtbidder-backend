@@ -1,17 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const { stripe, isTestMode } = require('../lib/stripe');
+const { stripe, stripeFor, isTestMode, isLive } = require('../lib/stripe');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
 
 module.exports = (pool, authMiddleware) => {
   // Is escrow switched on? (front end uses this to word things)
-  router.get('/status', (req, res) => res.json({ enabled: !!stripe, test_mode: isTestMode, live: !!stripe && !isTestMode }));
+  router.get('/status', (req, res) => res.json({ enabled: !!stripe, test_mode: isTestMode, live: isLive }));
 
   // After Stripe Checkout: confirm the client paid, then hire the operator and mark funds held.
   router.post('/confirm', authMiddleware, async (req, res) => {
     try {
-      if (!stripe) return res.status(503).json({ error: 'Payments are not set up yet' });
       const { session_id } = req.body;
       if (!session_id) return res.status(400).json({ error: 'Missing session' });
 
@@ -22,6 +21,8 @@ module.exports = (pool, authMiddleware) => {
       if (!job.rows[0] || job.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your payment' });
       if (e.status !== 'pending_payment') return res.json({ status: e.status }); // already confirmed
 
+      const stripe = stripeFor(!!e.test_mode);
+      if (!stripe) return res.status(503).json({ error: 'Payments are not set up yet' });
       const session = await stripe.checkout.sessions.retrieve(session_id);
       if (session.payment_status !== 'paid') return res.status(400).json({ error: 'Payment not completed' });
 

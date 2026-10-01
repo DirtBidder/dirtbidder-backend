@@ -1,32 +1,41 @@
 // Operator payout accounts (Stripe Connect Express)
 const express = require('express');
 const router = express.Router();
-const { stripe, FRONTEND_URL } = require('../lib/stripe');
+const { stripeFor, isTestEmail, FRONTEND_URL } = require('../lib/stripe');
 const { payPendingPayouts } = require('../lib/payouts');
 const v2 = require('../lib/stripeV2');
 
 module.exports = (pool, authMiddleware) => {
-  function operatorsOnly(req, res, next) {
+  // Test operators (+test / +op emails) get test-mode payout accounts; real operators get live ones
+  async function operatorsOnly(req, res, next) {
     if (req.user.role !== 'operator') return res.status(403).json({ error: 'Only operator accounts get payouts' });
-    if (!stripe) return res.status(503).json({ error: 'Payments are not set up yet' });
-    next();
+    try {
+      const u = await pool.query('SELECT email, name, company_name, stripe_account_id, stripe_account_test FROM users WHERE id = $1', [req.user.id]);
+      const row = u.rows[0] || {};
+      const test = isTestEmail(row.email);
+      if (!stripeFor(test)) return res.status(503).json({ error: 'Payments are not set up yet' });
+      // An account made in the other mode doesn't count (e.g. a test-mode account after going live)
+      const sameMode = !!row.stripe_account_id && !!row.stripe_account_test === test;
+      req.payout = { test, row, acctId: sameMode ? row.stripe_account_id : null };
+      next();
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
   }
 
   // Start (or continue) payout setup: returns a Stripe-hosted link where the operator adds their bank
   router.post('/onboard', authMiddleware, operatorsOnly, async (req, res) => {
     try {
-      const u = await pool.query('SELECT email, name, company_name, stripe_account_id FROM users WHERE id = $1', [req.user.id]);
-      const row = u.rows[0];
-      let acctId = row && row.stripe_account_id;
+      const { test, row } = req.payout;
+      let acctId = req.payout.acctId;
       if (!acctId) {
-        const acct = await v2.createRecipientAccount({ email: row.email, name: row.company_name || row.name, userId: req.user.id });
+        const acct = await v2.createRecipientAccount({ email: row.email, name: row.company_name || row.name, userId: req.user.id }, test);
         acctId = acct.id;
-        await pool.query('UPDATE users SET stripe_account_id = $1 WHERE id = $2', [acctId, req.user.id]);
+        await pool.query('UPDATE users SET stripe_account_id = $1, stripe_account_test = $2 WHERE id = $3', [acctId, test, req.user.id]);
       }
       const link = await v2.createOnboardingLink(
         acctId,
         FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=return',
-        FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=refresh'
+        FRONTEND_URL + '/dirtbidder-operator-dashboard.html?connect=refresh',
+        test
       );
       res.json({ url: link.url });
     } catch (err) {
@@ -41,10 +50,9 @@ module.exports = (pool, authMiddleware) => {
   // Payout setup status; also sends any payouts that were waiting on this setup
   router.get('/status', authMiddleware, operatorsOnly, async (req, res) => {
     try {
-      const u = await pool.query('SELECT stripe_account_id FROM users WHERE id = $1', [req.user.id]);
-      const acctId = u.rows[0] && u.rows[0].stripe_account_id;
+      const { test, acctId } = req.payout;
       if (!acctId) return res.json({ connected: false, payouts_enabled: false });
-      const acct = await v2.getAccount(acctId);
+      const acct = await v2.getAccount(acctId, test);
       const status = v2.transfersStatus(acct);
       const ready = status === 'active';
       let sent = 0;
@@ -64,10 +72,9 @@ module.exports = (pool, authMiddleware) => {
   // Link to the operator's Stripe Express dashboard (see payouts, update bank)
   router.post('/dashboard', authMiddleware, operatorsOnly, async (req, res) => {
     try {
-      const u = await pool.query('SELECT stripe_account_id FROM users WHERE id = $1', [req.user.id]);
-      const acctId = u.rows[0] && u.rows[0].stripe_account_id;
+      const { test, acctId } = req.payout;
       if (!acctId) return res.status(400).json({ error: 'Set up payouts first' });
-      const link = await stripe.accounts.createLoginLink(acctId);
+      const link = await stripeFor(test).accounts.createLoginLink(acctId);
       res.json({ url: link.url });
     } catch (err) {
       console.error('Connect dashboard error:', err.message);

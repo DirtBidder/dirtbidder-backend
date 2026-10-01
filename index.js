@@ -351,7 +351,13 @@ async function runMigrations() {
          read_at TIMESTAMP,
          created_at TIMESTAMP DEFAULT NOW()
        )`,
-      "CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages (job_id, operator_id, id)"
+      "CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages (job_id, operator_id, id)",
+      // Two Stripe modes side by side: remember which mode each payment / payout account belongs to.
+      // Everything created before this change was made with the test key.
+      "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS test_mode BOOLEAN",
+      "UPDATE escrow_transactions SET test_mode = true WHERE test_mode IS NULL",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_account_test BOOLEAN",
+      "UPDATE users SET stripe_account_test = true WHERE stripe_account_id IS NOT NULL AND stripe_account_test IS NULL"
     ];
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }

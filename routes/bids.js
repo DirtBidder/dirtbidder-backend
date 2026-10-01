@@ -1,7 +1,7 @@
 const express = require('express');
 const { scanFields, addFlag } = require('../lib/flags');
 const router = express.Router();
-const { stripe, FRONTEND_URL, isTestMode } = require('../lib/stripe');
+const { stripeFor, FRONTEND_URL, isLive } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
@@ -94,7 +94,9 @@ module.exports = (pool, authMiddleware) => {
 
       // Until Stripe is LIVE, real jobs can't be hired (test jobs still can, so the flow can be tried).
       // The client goes on a waitlist and gets an email when payments open.
-      if (bid.job_status !== 'test' && !(stripe && !isTestMode)) {
+      const testJob = bid.job_status === 'test';
+      const stripe = stripeFor(testJob);
+      if (!testJob && !isLive) {
         const added = await pool.query(
           'INSERT INTO payment_waitlist (bid_id, user_id, job_id) VALUES ($1, $2, $3) ON CONFLICT (bid_id) DO NOTHING RETURNING id',
           [bid.id, req.user.id, bid.job_id]);
@@ -105,6 +107,8 @@ module.exports = (pool, authMiddleware) => {
         });
       }
 
+      // Test job but no test key (after going live, STRIPE_TEST_SECRET_KEY must be set in Railway)
+      if (!stripe && testJob && isLive) return res.status(503).json({ error: 'Test payments are off. Add STRIPE_TEST_SECRET_KEY in Railway to keep testing.' });
       // Payments not set up yet: hire right away (no escrow)
       if (!stripe) {
         await hireBid(pool, bid);
@@ -117,9 +121,9 @@ module.exports = (pool, authMiddleware) => {
       const job = await pool.query('SELECT title FROM jobs WHERE id = $1', [bid.job_id]);
       const title = (job.rows[0] && job.rows[0].title) || 'DirtBidder job';
       const esc = await pool.query(
-        `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment') RETURNING id`,
-        [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout]
+        `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment', $8) RETURNING id`,
+        [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout, testJob]
       );
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
