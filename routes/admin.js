@@ -4,6 +4,8 @@ const router = express.Router();
 const { getReputation } = require('../lib/reputation');
 const notify = require('../lib/notify');
 const hq = require('../lib/hq');
+const { sendEmail, SITE } = require('../lib/email');
+const { isLive } = require('../lib/stripe');
 
 module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // Search users by name, company, email or phone. Empty search = newest 50.
@@ -181,6 +183,66 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         visitors,
         tasks: tasks.rows
       });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ── Payments waitlist: clients who tried to hire before payments were live ──
+  const usd = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const waitlistRows = () => pool.query(
+    `SELECT w.id, w.user_id, w.created_at, w.notified_at, u.name, u.email, j.id AS job_id, j.title, b.amount,
+            COALESCE(NULLIF(o.company_name, ''), o.name) AS operator,
+            (j.status = 'open' AND b.status = 'pending') AS can_hire
+     FROM payment_waitlist w
+     JOIN users u ON u.id = w.user_id JOIN jobs j ON j.id = w.job_id
+     JOIN bids b ON b.id = w.bid_id JOIN users o ON o.id = b.operator_id
+     ORDER BY w.created_at DESC LIMIT 300`);
+
+  router.get('/waitlist', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await waitlistRows();
+      res.json({ live: isLive, waiting: r.rows.filter(x => !x.notified_at).length, rows: r.rows });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Email everyone still waiting that they can hire now (one email per client, listing their jobs)
+  router.post('/waitlist/notify', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      if (!isLive) return res.status(400).json({ error: 'Live payments aren’t on yet, so there’s nothing to announce.' });
+      // Claim the rows first so a double click can't send twice
+      const claimed = await pool.query('UPDATE payment_waitlist SET notified_at = NOW() WHERE notified_at IS NULL RETURNING id');
+      const ids = new Set(claimed.rows.map(x => x.id));
+      if (!ids.size) return res.json({ sent: 0 });
+      const all = (await waitlistRows()).rows.filter(x => ids.has(x.id));
+      const byUser = {};
+      all.forEach(x => { (byUser[x.user_id] = byUser[x.user_id] || []).push(x); });
+      let sent = 0, failed = 0;
+      for (const rows of Object.values(byUser)) {
+        const u = rows[0];
+        const ready = rows.filter(x => x.can_hire);
+        const first = String(u.name || '').trim().split(/\s+/)[0];
+        const ok = await sendEmail(u.email, {
+          subject: 'Payments are open on DirtBidder — you can hire now',
+          heading: ready.length ? 'You can hire your operator now' : 'Payments are open on DirtBidder',
+          lines: [
+            `${first ? 'Hi ' + first + ', t' : 'T'}hanks for your patience. Our secure escrow payments are now live.`,
+            ...ready.map(x => `• "${x.title}": ${x.operator || 'your operator'}'s ${usd(x.amount)} bid is still waiting for you.`),
+            ...(ready.length ? [] : ['The bid you picked earlier is no longer open, but you can post the job again or accept another bid any time.']),
+            'Your payment is held in escrow and only released when you say the job is done. Pay by bank account or card (jobs over $10,000 are paid by bank account).'
+          ],
+          button: { label: ready.length ? 'Review Your Bids' : 'Open Dashboard', url: SITE + '/dirtbidder-client-dashboard.html' }
+        });
+        if (ok) { sent++; continue; }
+        // The email didn't go out, so put this client back on the list to try again
+        failed++;
+        for (const x of rows) await pool.query('UPDATE payment_waitlist SET notified_at = NULL WHERE id = $1', [x.id]);
+      }
+      res.json({ sent, failed });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
