@@ -379,6 +379,11 @@ async function runMigrations() {
       "CREATE INDEX IF NOT EXISTS change_orders_job_idx ON change_orders (job_id)",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
       "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
+      // Owner's own real-money test jobs: hidden from stats, job lists and operator job counts (Stripe keeps the real record)
+      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT false",
+      `UPDATE jobs j SET internal = true FROM users c
+       WHERE c.id = j.client_id AND lower(c.email) = 'daniel@dirtbidder.com'
+         AND j.title ILIKE 'dirtbidder test%' AND j.status = 'completed' AND NOT COALESCE(j.internal, false)`,
       // One-time cleanup: test-account jobs left "in progress" from before payments existed (never funded)
       `UPDATE jobs j SET status = 'closed' FROM users c
        WHERE c.id = j.client_id AND c.email ~* '\\+(test|op)[0-9]*@' AND j.status = 'in_progress'

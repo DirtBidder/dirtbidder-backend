@@ -54,7 +54,7 @@ module.exports = (pool, authMiddleware) => {
            FROM jobs j
            LEFT JOIN bids ab ON ab.job_id = j.id AND ab.status = 'accepted'
            LEFT JOIN users ou ON ou.id = ab.operator_id
-           WHERE j.client_id = $1
+           WHERE j.client_id = $1 AND NOT COALESCE(j.internal, false)
            ORDER BY j.created_at DESC`,
           [req.user.id]
         );

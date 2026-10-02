@@ -84,7 +84,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
       const withTest = req.query.test === '1';
       const T = a => `${a}.email ~* '\\+(test|op)[0-9]*@'`; // is a test account
       const realUser = a => `($1::boolean OR NOT ${T(a)})`;
-      const realJob = (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT ${T(c)}))`;
+      const realJob = (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT COALESCE(${j}.internal, false) AND NOT ${T(c)}))`;
       const p = [withTest];
 
       const [users, jobs, bids, money, open, weekly, activity, hidden] = await Promise.all([

@@ -66,7 +66,7 @@ module.exports = (pool, authMiddleware) => {
          JOIN jobs j ON j.id = e.job_id
          LEFT JOIN bids b ON b.id = e.bid_id
          WHERE e.status IN ('processing', 'held', 'released', 'refund_needed', 'disputed', 'refunded', 'failed')
-           AND (j.client_id = $1 OR b.operator_id = $1)
+           AND (j.client_id = $1 OR b.operator_id = $1) AND NOT COALESCE(j.internal, false)
          ORDER BY e.created_at DESC`,
         [req.user.id]
       );
