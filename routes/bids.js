@@ -64,7 +64,9 @@ module.exports = (pool, authMiddleware) => {
                    FROM disputes d WHERE d.job_id = j.id ORDER BY d.id DESC LIMIT 1) x) AS dispute,
                 CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN cu.name END AS client_name,
                 CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN cu.phone END AS client_phone,
-                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN j.site_address END AS job_address
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN j.site_address END AS job_address,
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN j.site_lat END AS job_lat,
+                CASE WHEN b.status = 'accepted' AND j.status <> 'funding' THEN j.site_lng END AS job_lng
          FROM bids b
          JOIN jobs j ON j.id = b.job_id
          LEFT JOIN users cu ON cu.id = j.client_id

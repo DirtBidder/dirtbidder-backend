@@ -6,6 +6,14 @@ const { scanFields, addFlag, checkClosePattern } = require('../lib/flags');
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
 const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
 
+// A GPS pin: both numbers present and on the globe, rounded to ~10 cm
+function parsePin(lat, lng) {
+  const a = Number(lat), b = Number(lng);
+  if (lat === null || lng === null || lat === '' || lng === '' || lat === undefined || lng === undefined) return null;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+  return { lat: Math.round(a * 1e6) / 1e6, lng: Math.round(b * 1e6) / 1e6 };
+}
+
 module.exports = (pool, authMiddleware) => {
   // Post a new job (client only)
   router.post('/', authMiddleware, async (req, res) => {
@@ -19,12 +27,13 @@ module.exports = (pool, authMiddleware) => {
         return res.status(403).json({ error: 'Operator accounts can’t post jobs. Sign in with a client account to post a job.' });
       // Jobs from test accounts (emails with "+test" or "+op") are hidden from real operators
       const isTest = u.rows[0] && /\+(test|op)\d*@/i.test(u.rows[0].email || '');
+      const pin = parsePin(req.body.site_lat, req.body.site_lng);
       // Public job text can't carry phone numbers/emails (those go in the private address field)
       const scan = scanFields({ title, description });
       const result = await pool.query(
-        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status, site_address)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.user.id, scan.cleaned.title, scan.cleaned.description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open', siteAddress]
+        `INSERT INTO jobs (client_id, title, description, location, job_type, acreage, timeline, budget, status, site_address, site_lat, site_lng)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        [req.user.id, scan.cleaned.title, scan.cleaned.description, location, job_type, acreage, timeline, budget, isTest ? 'test' : 'open', siteAddress, pin ? pin.lat : null, pin ? pin.lng : null]
       );
       if (scan.reasons.length) addFlag(pool, { kind: 'job', userId: req.user.id, jobId: result.rows[0].id,
         reason: 'Job post ' + scan.reasons.join(', '), details: scan.original });
@@ -196,6 +205,23 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Set, move or remove the GPS pin (only the client who posted the job). Body: { lat, lng } or { lat: null }
+  router.put('/:id/pin', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      const clearing = req.body.lat === null || req.body.lat === '' || req.body.lat === undefined;
+      const pin = clearing ? null : parsePin(req.body.lat, req.body.lng);
+      if (!clearing && !pin) return res.status(400).json({ error: 'That pin location isn’t valid' });
+      await pool.query('UPDATE jobs SET site_lat = $1, site_lng = $2 WHERE id = $3', [pin ? pin.lat : null, pin ? pin.lng : null, req.params.id]);
+      res.json({ site_lat: pin ? pin.lat : null, site_lng: pin ? pin.lng : null });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Job detail. The exact address is only included for the client who posted it and the hired operator.
   router.get('/:id', authMiddleware, async (req, res) => {
     try {
@@ -204,7 +230,7 @@ module.exports = (pool, authMiddleware) => {
       const job = result.rows[0];
       if (job.client_id !== req.user.id) {
         const hired = await pool.query("SELECT 1 FROM bids WHERE job_id = $1 AND operator_id = $2 AND status = 'accepted'", [job.id, req.user.id]);
-        if (hired.rows.length === 0 || job.status === 'funding') delete job.site_address;
+        if (hired.rows.length === 0 || job.status === 'funding') { delete job.site_address; delete job.site_lat; delete job.site_lng; }
       }
       res.json(job);
     } catch (err) {
