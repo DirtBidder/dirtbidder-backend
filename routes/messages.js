@@ -1,5 +1,5 @@
 // In-app messaging between a client and an operator, one thread per (job, operator).
-// Who can see a thread: the job's client, any operator who bid on the job (their own thread only), and admins (read-only).
+// Who can see a thread: the job's client, any operator who bid on the job or asked a question about it (their own thread only), and admins (read-only).
 // Before the operator is hired, phone numbers / emails / links are hidden and "pay me direct" talk is flagged —
 // same rules as bids. After hire, contact info goes through (they need to coordinate on site).
 const express = require('express');
@@ -14,45 +14,73 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
     return !!u && (u.role === 'owner' || ADMIN_EMAILS.includes(String(u.email || '').toLowerCase()));
   };
 
+  const TEST_ACCT = /\+(test|op)\d*@/i;
+  const baseEmail = e => { const [l, d] = String(e || '').toLowerCase().split('@'); return (l || '').split('+')[0] + '@' + (d || ''); };
+
   // Thread info + my side of it. Returns null if I'm not part of it.
+  // A thread exists once the operator has bid OR has asked a question. An operator can start one on any job
+  // they're allowed to see that is still taking bids, so they can ask before they price it.
   async function threadFor(userId, jobId, operatorId) {
     const r = await pool.query(
       `SELECT j.id AS job_id, j.title AS job_title, j.status AS job_status, j.client_id,
+              j.site_address, j.site_lat, j.site_lng,
               (SELECT b.id FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_id,
               (SELECT b.status FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_status,
+              (SELECT b.amount FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_amount,
               (SELECT b.operator_id FROM bids b WHERE b.job_id = j.id AND b.status = 'accepted' LIMIT 1) AS hired_operator_id,
-              c.name AS client_name, COALESCE(NULLIF(o.company_name, ''), o.name) AS operator_name
+              EXISTS (SELECT 1 FROM messages m WHERE m.job_id = j.id AND m.operator_id = $2) AS has_messages,
+              EXISTS (SELECT 1 FROM job_location_shares s WHERE s.job_id = j.id AND s.operator_id = $2) AS location_shared,
+              c.name AS client_name, c.email AS client_email, o.email AS operator_email, o.role AS operator_role,
+              COALESCE(NULLIF(o.company_name, ''), o.name) AS operator_name
        FROM jobs j JOIN users c ON c.id = j.client_id JOIN users o ON o.id = $2
        WHERE j.id = $1`, [jobId, operatorId]);
     const t = r.rows[0];
-    if (!t || !t.bid_id) return null; // no thread unless the operator bid on the job
+    if (!t) return null;
     if (userId === t.client_id) t.me = 'client';
     else if (userId === operatorId) t.me = 'operator';
     else if (await isAdmin(userId)) t.me = 'admin';
     else return null;
+    const taking = ['open', 'test'].includes(t.job_status);
+    if (!t.bid_id && !t.has_messages) {
+      // Nothing here yet: only the operator can start it, with a question, on a job they can see
+      const canSee = t.job_status === 'open'
+        || (t.job_status === 'test' && (TEST_ACCT.test(t.operator_email || '') || baseEmail(t.operator_email) === baseEmail(t.client_email)));
+      if (t.me !== 'operator' || t.operator_role !== 'operator' || operatorId === t.client_id || !canSee) return null;
+    }
     t.operator_id = operatorId;
+    t.asking = !t.bid_id; // question thread, no bid yet
     const picked = t.hired_operator_id === operatorId;
     // Contact info stays hidden until the hire is paid (a bank payment that is still clearing doesn't count yet)
     t.hired = picked && t.job_status !== 'funding';
     // Sending closes once someone else was hired, or the job was closed/cancelled without this operator
-    t.can_send = t.me !== 'admin' && (picked || (!t.hired_operator_id && ['open', 'test'].includes(t.job_status) && t.bid_status !== 'withdrawn'));
+    t.can_send = t.me !== 'admin' && (picked || (!t.hired_operator_id && taking && t.bid_status !== 'withdrawn'));
     t.closed_reason = t.can_send || t.me === 'admin' ? null
       : t.hired_operator_id ? 'This job went to another operator, so this conversation is closed.'
       : t.bid_status === 'withdrawn' ? 'This bid was withdrawn, so this conversation is closed.'
       : 'This job is closed, so this conversation is closed.';
+    // Job location: the operator sees it once hired and paid, or earlier if the client chose to share it with them
+    const hasLocation = !!(t.site_address || (t.site_lat != null && t.site_lng != null));
+    const sharedNow = t.location_shared && taking && !t.hired_operator_id;
+    t.location = t.me !== 'client' && hasLocation && (t.hired || sharedNow)
+      ? { address: t.site_address || null, lat: t.site_lat, lng: t.site_lng } : null;
+    t.share = t.me === 'client' ? { has_location: hasLocation, shared: !!sharedNow, can_share: taking && !t.hired_operator_id } : null;
     return t;
   }
 
-  // My conversations: one per job + operator pair where a bid exists, newest activity first
+  // My conversations: one per job + operator pair where a bid or a question exists, newest activity first
   router.get('/threads', authMiddleware, async (req, res) => {
     try {
       const me = req.user.id;
       const r = await pool.query(
         `WITH pairs AS (
-           SELECT DISTINCT ON (b.job_id, b.operator_id) b.job_id, b.operator_id, b.amount, b.status AS bid_status, b.created_at AS bid_at
-           FROM bids b JOIN jobs j ON j.id = b.job_id
-           WHERE j.client_id = $1 OR b.operator_id = $1
-           ORDER BY b.job_id, b.operator_id, b.id DESC
+           SELECT DISTINCT ON (x.job_id, x.operator_id) x.job_id, x.operator_id, x.amount, x.bid_status, x.at AS bid_at
+           FROM (
+             SELECT b.job_id, b.operator_id, b.amount, b.status AS bid_status, b.created_at AS at, 1 AS pri, b.id AS ord FROM bids b
+             UNION ALL
+             SELECT m.job_id, m.operator_id, NULL::numeric, NULL::varchar, MIN(m.created_at), 0, 0 FROM messages m GROUP BY m.job_id, m.operator_id
+           ) x JOIN jobs j ON j.id = x.job_id
+           WHERE j.client_id = $1 OR x.operator_id = $1
+           ORDER BY x.job_id, x.operator_id, x.pri DESC, x.ord DESC
          )
          SELECT p.job_id, p.operator_id, p.amount, p.bid_status, j.title AS job_title, j.status AS job_status,
                 CASE WHEN j.client_id = $1 THEN 'client' ELSE 'operator' END AS me,
@@ -104,7 +132,8 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
         thread: {
           job_id: t.job_id, job_title: t.job_title, job_status: t.job_status, operator_id: t.operator_id,
           client_id: t.client_id, client_name: t.client_name, operator_name: t.operator_name,
-          me: t.me, my_id: req.user.id, hired: t.hired, can_send: t.can_send, closed_reason: t.closed_reason
+          me: t.me, my_id: req.user.id, hired: t.hired, can_send: t.can_send, closed_reason: t.closed_reason,
+          asking: t.asking, bid_amount: t.bid_amount, bid_status: t.bid_status, location: t.location, share: t.share
         },
         messages: m.rows
       });

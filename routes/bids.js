@@ -53,11 +53,55 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Change a bid that hasn't been accepted yet (after talking to the client or looking at the site)
+  router.put('/:id', authMiddleware, async (req, res) => {
+    try {
+      const { amount, message, est_days, equipment } = req.body;
+      const amt = Number(amount);
+      if (!amt || amt <= 0) return res.status(400).json({ error: 'Enter a bid amount' });
+      const days = est_days ? parseInt(est_days, 10) : null;
+      const r = await pool.query(
+        'SELECT b.id, b.job_id, b.operator_id, b.amount, b.status, j.status AS job_status FROM bids b JOIN jobs j ON j.id = b.job_id WHERE b.id = $1', [req.params.id]);
+      const bid = r.rows[0];
+      if (!bid || bid.operator_id !== req.user.id) return res.status(404).json({ error: 'Bid not found' });
+      if (bid.status !== 'pending' || !['open', 'test'].includes(bid.job_status))
+        return res.status(400).json({ error: bid.status === 'accepted' ? 'This bid was already accepted. Use a change request if the price needs to change.' : 'This bid can no longer be changed' });
+
+      // If the client is in the middle of paying for the current number, don't change it under them.
+      // A checkout they walked away from is closed out so it can't be paid later at the old price.
+      const open = await pool.query(
+        "SELECT id, stripe_session_id, test_mode, created_at > NOW() - INTERVAL '30 minutes' AS fresh FROM escrow_transactions WHERE bid_id = $1 AND status IN ('pending_payment', 'processing')", [bid.id]);
+      for (const e of open.rows) {
+        if (e.fresh) return res.status(400).json({ error: 'The client is paying for your current bid right now. If they don’t finish, you can change it in about 30 minutes.' });
+        const stripe = stripeFor(!!e.test_mode);
+        try { if (stripe && e.stripe_session_id) await stripe.checkout.sessions.expire(e.stripe_session_id); }
+        catch (err) { return res.status(400).json({ error: 'The client has already paid for your current bid. Refresh the page.' }); }
+        await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE id = $1 AND status = 'pending_payment'", [e.id]);
+      }
+
+      const scan = scanFields({ message: message || null, equipment: equipment || null });
+      const changed = Number(bid.amount) !== amt;
+      const u = await pool.query(
+        `UPDATE bids SET amount = $1, message = $2, est_days = $3, equipment = $4, updated_at = NOW(),
+                prev_amount = CASE WHEN amount <> $1 THEN amount ELSE prev_amount END
+         WHERE id = $5 AND status = 'pending' RETURNING *`,
+        [amt, scan.cleaned.message, isNaN(days) ? null : days, scan.cleaned.equipment, bid.id]);
+      if (!u.rows[0]) return res.status(400).json({ error: 'This bid can no longer be changed' });
+      if (scan.reasons.length) addFlag(pool, { kind: 'bid', userId: req.user.id, jobId: bid.job_id, bidId: bid.id,
+        reason: 'Bid message ' + scan.reasons.join(', '), details: scan.original });
+      if (changed) notify.bidUpdated(pool, bid.id, Number(bid.amount));
+      res.json(u.rows[0]);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // The logged-in operator's bids, with the job they're on
   router.get('/mine', authMiddleware, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at,
+        `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at, b.updated_at, b.prev_amount,
                 j.title AS job_title, j.location AS job_location, j.status AS job_status, j.timeline AS job_timeline,
                 j.completed_at AS job_completed_at,
                 (SELECT row_to_json(x) FROM (SELECT d.id, d.reason, d.status, d.resolution, d.operator_response, d.admin_note

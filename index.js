@@ -374,6 +374,15 @@ async function runMigrations() {
          created_at TIMESTAMP DEFAULT NOW()
        )`,
       "CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages (job_id, operator_id, id)",
+      // Bids can be updated until accepted; clients can share the job location with one operator before hiring
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+      "ALTER TABLE bids ADD COLUMN IF NOT EXISTS prev_amount NUMERIC(12,2)",
+      `CREATE TABLE IF NOT EXISTS job_location_shares (
+         job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+         operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         created_at TIMESTAMP DEFAULT NOW(),
+         PRIMARY KEY (job_id, operator_id)
+       )`,
       // Two Stripe modes side by side: remember which mode each payment / payout account belongs to.
       // Everything created before this change was made with the test key.
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS test_mode BOOLEAN",

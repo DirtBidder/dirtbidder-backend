@@ -79,9 +79,13 @@ module.exports = (pool, authMiddleware) => {
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status,
+             CASE WHEN sh.job_id IS NOT NULL THEN j.site_address END AS shared_address,
+             CASE WHEN sh.job_id IS NOT NULL THEN j.site_lat END AS shared_lat,
+             CASE WHEN sh.job_id IS NOT NULL THEN j.site_lng END AS shared_lng,
              (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id AND p.kind = 'site') AS photos
            FROM jobs j
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
+           LEFT JOIN job_location_shares sh ON sh.job_id = j.id AND sh.operator_id = $1
            LEFT JOIN users cu ON cu.id = j.client_id
            WHERE j.client_id <> $1 AND (j.status = 'open'
               OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')})))
@@ -104,6 +108,8 @@ module.exports = (pool, authMiddleware) => {
       if (job.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       const result = await pool.query(
         `SELECT b.id, b.job_id, b.amount, b.message, b.est_days, b.equipment, b.status, b.created_at, b.operator_id,
+                b.updated_at, b.prev_amount,
+                EXISTS (SELECT 1 FROM job_location_shares s WHERE s.job_id = b.job_id AND s.operator_id = b.operator_id) AS location_shared,
                 COALESCE(NULLIF(u.company_name, ''), u.name) AS operator_name
          FROM bids b LEFT JOIN users u ON u.id = b.operator_id
          WHERE b.job_id = $1 ORDER BY b.created_at DESC`,
@@ -225,6 +231,36 @@ module.exports = (pool, authMiddleware) => {
   });
 
   // Job detail. The exact address is only included for the client who posted it and the hired operator.
+  // Client shares (or stops sharing) the job's exact location with one operator before hiring, so they can look at the site.
+  // Only operators the client is already talking to (they bid or asked a question). Phone numbers stay hidden until hire.
+  router.post('/:id/share-location', authMiddleware, async (req, res) => {
+    try {
+      const jobId = parseInt(req.params.id, 10), operatorId = parseInt(req.body.operator_id, 10);
+      const j = (await pool.query('SELECT id, client_id, status, site_address, site_lat, site_lng FROM jobs WHERE id = $1', [jobId])).rows[0];
+      if (!j) return res.status(404).json({ error: 'Job not found' });
+      if (j.client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (req.body.share === false) {
+        await pool.query('DELETE FROM job_location_shares WHERE job_id = $1 AND operator_id = $2', [jobId, operatorId]);
+        return res.json({ shared: false });
+      }
+      if (!['open', 'test'].includes(j.status)) return res.status(400).json({ error: 'This job already has a hired operator. They see the location automatically.' });
+      if (!j.site_address && (j.site_lat == null || j.site_lng == null))
+        return res.status(400).json({ error: 'Add the job address or drop a GPS pin first (My Jobs), then share it.' });
+      const talking = await pool.query(
+        `SELECT 1 FROM users o WHERE o.id = $2 AND o.role = 'operator' AND (
+           EXISTS (SELECT 1 FROM bids b WHERE b.job_id = $1 AND b.operator_id = $2 AND b.status <> 'withdrawn')
+           OR EXISTS (SELECT 1 FROM messages m WHERE m.job_id = $1 AND m.operator_id = $2))`, [jobId, operatorId]);
+      if (!talking.rows.length) return res.status(400).json({ error: 'You can share the location with an operator who has bid or asked you a question.' });
+      const added = await pool.query(
+        'INSERT INTO job_location_shares (job_id, operator_id) VALUES ($1, $2) ON CONFLICT (job_id, operator_id) DO NOTHING RETURNING job_id', [jobId, operatorId]);
+      if (added.rows.length) notify.locationShared(pool, jobId, operatorId);
+      res.json({ shared: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   router.get('/:id', authMiddleware, async (req, res) => {
     try {
       const result = await pool.query('SELECT * FROM jobs WHERE id = $1', [req.params.id]);
@@ -232,7 +268,10 @@ module.exports = (pool, authMiddleware) => {
       const job = result.rows[0];
       if (job.client_id !== req.user.id) {
         const hired = await pool.query("SELECT 1 FROM bids WHERE job_id = $1 AND operator_id = $2 AND status = 'accepted'", [job.id, req.user.id]);
-        if (hired.rows.length === 0 || job.status === 'funding') { delete job.site_address; delete job.site_lat; delete job.site_lng; }
+        // ...or the client chose to share the location with this operator before hiring, so they can go look at the site
+        const shared = ['open', 'test'].includes(job.status)
+          && (await pool.query('SELECT 1 FROM job_location_shares WHERE job_id = $1 AND operator_id = $2', [job.id, req.user.id])).rows.length > 0;
+        if (!shared && (hired.rows.length === 0 || job.status === 'funding')) { delete job.site_address; delete job.site_lat; delete job.site_lng; }
       }
       res.json(job);
     } catch (err) {
