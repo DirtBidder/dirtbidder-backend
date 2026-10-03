@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { releaseJob } = require('../lib/release');
 const { scanFields, addFlag, checkClosePattern } = require('../lib/flags');
+const notify = require('../lib/notify');
 
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
 const BASE_EMAIL = col => `lower(split_part(split_part(${col}, '@', 1), '+', 1) || '@' || split_part(${col}, '@', 2))`;
@@ -37,6 +38,7 @@ module.exports = (pool, authMiddleware) => {
       );
       if (scan.reasons.length) addFlag(pool, { kind: 'job', userId: req.user.id, jobId: result.rows[0].id,
         reason: 'Job post ' + scan.reasons.join(', '), details: scan.original });
+      notify.newJob(pool, result.rows[0].id);
       res.json(result.rows[0]);
     } catch (err) {
       console.error(err);

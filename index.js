@@ -139,6 +139,7 @@ app.put('/api/me/profile', authMiddleware, async (req, res) => {
     for (const [k, n] of [['equipmentOther', 300], ['zip', 10], ['serviceRadius', 30], ['yearsExp', 30], ['bio', 800]]) {
       const v = str(b[k], n); if (v !== undefined) patch[k] = v;
     }
+    if (typeof b.jobAlerts === 'boolean') patch.jobAlerts = b.jobAlerts; // new-job emails on/off
     const { scanFields, addFlag } = require('./lib/flags');
     const scan = scanFields({ bio: patch.bio, equipmentOther: patch.equipmentOther });
     if (patch.bio !== undefined) patch.bio = scan.cleaned.bio;
@@ -172,6 +173,26 @@ app.post('/api/me/password', authMiddleware, async (req, res) => {
 const jobsRoutes = require('./routes/jobs');
 const bidsRoutes = require('./routes/bids');
 const dashboardRoutes = require('./routes/dashboard');
+
+// Turn off new-job emails from the link in the email (no login needed; the link is signed)
+const alertsOff = async (req, res) => {
+  const page = (title, text) => res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DirtBidder</title></head>
+<body style="margin:0;background:#1C1410;color:#F2EDE6;font-family:Arial,Helvetica,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center">
+<div style="max-width:420px;padding:32px 24px;text-align:center"><div style="font-size:26px;font-weight:900;margin-bottom:18px"><span style="color:#E8892A">Dirt</span>Bidder</div>
+<h1 style="font-size:20px;margin:0 0 12px">${title}</h1><p style="color:#C4A882;line-height:1.5;margin:0 0 22px">${text}</p>
+<a href="${process.env.FRONTEND_URL || 'https://www.dirtbidder.com'}/dirtbidder-operator-dashboard.html" style="display:inline-block;background:#E8892A;color:#1C1410;font-weight:700;text-decoration:none;padding:12px 22px;border-radius:4px">Open Dashboard</a></div></body></html>`);
+  try {
+    const d = jwt.verify(String(req.query.t || ''), JWT_SECRET);
+    if (d.alerts !== 'off') throw new Error('wrong link');
+    await pool.query("UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || '{\"jobAlerts\": false}'::jsonb WHERE id = $1", [d.id]);
+    page('New-job emails are off', 'You won’t get an email when jobs are posted. You’ll still get emails about your own bids, jobs and payments. You can turn these back on any time in Settings.');
+  } catch (err) {
+    res.status(400);
+    page('That link didn’t work', 'Log in and open Settings to turn new-job emails on or off.');
+  }
+};
+app.get('/api/alerts/unsubscribe', alertsOff);
+app.post('/api/alerts/unsubscribe', alertsOff);
 
 app.use('/api/jobs', jobsRoutes(pool, authMiddleware));
 app.use('/api/bids', bidsRoutes(pool, authMiddleware));
