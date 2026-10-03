@@ -417,6 +417,20 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // The owner's own accounts are left out of the HQ numbers, like test accounts (they still work normally on the site).
+    // Auto-flagged: admin emails, any "+alias" of an admin email, and the plain address behind a +test / +op account.
+    // Anything this misses can be switched by hand on the admin Users tab (users.internal).
+    try {
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS internal BOOLEAN');
+      const base = c => `lower(split_part(split_part(${c}, '@', 1), '+', 1) || '@' || split_part(${c}, '@', 2))`;
+      const own = await pool.query(
+        `UPDATE users u SET internal = true
+         WHERE u.internal IS NULL AND u.email !~* '\\+(test|op)[0-9]*@'
+           AND (${base('u.email')} = ANY($1::text[])
+             OR EXISTS (SELECT 1 FROM users t WHERE t.email ~* '\\+(test|op)[0-9]*@' AND ${base('t.email')} = lower(u.email)))
+         RETURNING id`, [ADMIN_EMAILS]);
+      if (own.rowCount) console.log('Owner accounts left out of HQ:', own.rowCount);
+    } catch (e) { console.error('Owner-account flag failed:', e.message); }
     // Jobs posted by test accounts (+test / +op emails) must never be public
     const hiddenTests = await pool.query(
       "UPDATE jobs SET status = 'test' WHERE status = 'open' AND client_id IN (SELECT id FROM users WHERE email ~* '\\+(test|op)[0-9]*@') RETURNING id");

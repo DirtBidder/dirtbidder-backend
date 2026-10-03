@@ -13,7 +13,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     try {
       const q = String(req.query.q || '').trim();
       const r = await pool.query(
-        `SELECT u.id, u.email, u.name, u.company_name, u.phone, u.role, u.created_at, u.suspended_at, u.suspended_reason,
+        `SELECT u.id, u.email, u.name, u.company_name, u.phone, u.role, u.created_at, u.suspended_at, u.suspended_reason, COALESCE(u.internal, false) AS internal,
            (SELECT COUNT(*) FROM jobs j WHERE j.client_id = u.id)::int AS jobs_posted,
            (SELECT COUNT(*) FROM bids b WHERE b.operator_id = u.id)::int AS bids_made,
            (SELECT COUNT(*) FROM disputes d JOIN jobs j ON j.id = d.job_id LEFT JOIN bids b ON b.job_id = j.id AND b.status = 'accepted'
@@ -32,6 +32,18 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         u.is_admin = ADMIN_EMAILS.includes(String(u.email || '').toLowerCase()) || u.role === 'owner';
       });
       res.json(r.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Mark an account as the owner's own (left out of HQ numbers) or as a real outside user. Changes nothing else about the account.
+  router.post('/users/:id/internal', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query('UPDATE users SET internal = $1 WHERE id = $2 RETURNING id, internal', [req.body.internal === true, parseInt(req.params.id, 10)]);
+      if (!r.rows[0]) return res.status(404).json({ error: 'User not found' });
+      res.json(r.rows[0]);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
@@ -84,7 +96,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   router.get('/hq', authMiddleware, adminOnly, async (req, res) => {
     try {
       const withTest = req.query.test === '1';
-      const T = a => `${a}.email ~* '\\+(test|op)[0-9]*@'`; // is a test account
+      // Not a real outside user: a test account (+test / +op email) or one of the owner's own accounts
+      const T = a => `(${a}.email ~* '\\+(test|op)[0-9]*@' OR COALESCE(${a}.internal, false))`;
       const realUser = a => `($1::boolean OR NOT ${T(a)})`;
       const realJob = (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT COALESCE(${j}.internal, false) AND NOT ${T(c)}))`;
       const p = [withTest];
