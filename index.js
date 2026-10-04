@@ -41,7 +41,8 @@ app.post('/api/signup', async (req, res) => {
     );
 
     const user = result.rows[0];
-    notify.confirmEmail(pool, user.id); // "confirm your email" link, so typos and fake addresses show up
+    notify.confirmEmail(pool, user.id, { welcome: true }); // welcome note + "confirm your email" link, so typos and fake addresses show up
+    notify.newSignup(pool, user.id); // tell the owner
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user });
   } catch (err) {
