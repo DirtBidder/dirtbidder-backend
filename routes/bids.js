@@ -6,12 +6,15 @@ const { breakdown } = require('../utils/fees');
 const { createCheckout } = require('../lib/funding');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
+const { operatorNotReady } = require('../lib/account');
 
 module.exports = (pool, authMiddleware) => {
   // Submit a bid on a job (operators only)
   router.post('/:jobId/bids', authMiddleware, async (req, res) => {
     try {
       if (req.user.role !== 'operator') return res.status(403).json({ error: 'Only operator accounts can bid' });
+      const notReady = await operatorNotReady(pool, req.user.id);
+      if (notReady) return res.status(403).json({ error: notReady, not_ready: true });
       const { amount, message, est_days, equipment } = req.body;
       const amt = Number(amount);
       if (!amt || amt <= 0) return res.status(400).json({ error: 'Enter a bid amount' });
@@ -64,6 +67,8 @@ module.exports = (pool, authMiddleware) => {
         'SELECT b.id, b.job_id, b.operator_id, b.amount, b.status, j.status AS job_status FROM bids b JOIN jobs j ON j.id = b.job_id WHERE b.id = $1', [req.params.id]);
       const bid = r.rows[0];
       if (!bid || bid.operator_id !== req.user.id) return res.status(404).json({ error: 'Bid not found' });
+      const notReady = await operatorNotReady(pool, req.user.id);
+      if (notReady) return res.status(403).json({ error: notReady, not_ready: true });
       if (bid.status !== 'pending' || !['open', 'test'].includes(bid.job_status))
         return res.status(400).json({ error: bid.status === 'accepted' ? 'This bid was already accepted. Use a change request if the price needs to change.' : 'This bid can no longer be changed' });
 

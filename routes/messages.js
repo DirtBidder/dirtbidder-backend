@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const { scanText, addFlag } = require('../lib/flags');
 const notify = require('../lib/notify');
+const { operatorNotReady } = require('../lib/account');
 
 module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
   const isAdmin = async userId => {
@@ -152,6 +153,11 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
       const t = await threadFor(req.user.id, jobId, operatorId);
       if (!t) return res.status(404).json({ error: 'Conversation not found' });
       if (!t.can_send) return res.status(400).json({ error: t.closed_reason || 'You can’t send messages here' });
+      // An operator who isn't hired yet needs a name and a confirmed email before writing to a client
+      if (t.me === 'operator' && t.hired_operator_id !== operatorId) {
+        const notReady = await operatorNotReady(pool, req.user.id);
+        if (notReady) return res.status(403).json({ error: notReady, not_ready: true });
+      }
 
       // Before hire: hide contact info and flag going-around-the-platform talk. After hire: payment words still flagged.
       const scan = scanText(raw);
