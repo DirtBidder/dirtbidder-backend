@@ -21,9 +21,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 // Signup
 app.post('/api/signup', async (req, res) => {
   try {
-    const { email, password, name, phone, role, profile } = req.body;
+    const { email, password, phone, role, profile } = req.body;
+    const name = String(req.body.name || '').replace(/\s+/g, ' ').trim().slice(0, 255);
     const companyName = profile && typeof profile.companyName === 'string' ? profile.companyName.trim().slice(0, 255) : null;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    if (!name) return res.status(400).json({ error: 'Please enter your name' });
 
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Email already registered' });
@@ -426,6 +428,8 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // Sign-up used to allow a blank name (saved as a single space). Store those as empty so "Operator"/"Client" fallbacks show instead of nothing.
+    try { await pool.query("UPDATE users SET name = '' WHERE name IS NOT NULL AND name <> '' AND btrim(name) = ''"); } catch (e) { console.error('Blank-name cleanup failed:', e.message); }
     // The owner's own accounts are left out of the HQ numbers, like test accounts (they still work normally on the site).
     // Auto-flagged: admin emails, any "+alias" of an admin email, and the plain address behind a +test / +op account.
     // Anything this misses can be switched by hand on the admin Users tab (users.internal).
