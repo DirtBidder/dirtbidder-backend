@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const notify = require('./lib/notify');
 const { Pool } = require('pg');
 require('dotenv').config();
 
@@ -21,13 +22,15 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 // Signup
 app.post('/api/signup', async (req, res) => {
   try {
-    const { email, password, phone, role, profile } = req.body;
+    const { password, phone, role, profile } = req.body;
+    const email = String(req.body.email || '').trim();
     const name = String(req.body.name || '').replace(/\s+/g, ' ').trim().slice(0, 255);
     const companyName = profile && typeof profile.companyName === 'string' ? profile.companyName.trim().slice(0, 255) : null;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
     if (!name) return res.status(400).json({ error: 'Please enter your name' });
+    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'That email address doesn’t look right. Check it and try again.' });
 
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    const existing = await pool.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Email already registered' });
 
     const hash = await bcrypt.hash(password, 10);
@@ -38,6 +41,7 @@ app.post('/api/signup', async (req, res) => {
     );
 
     const user = result.rows[0];
+    notify.confirmEmail(pool, user.id); // "confirm your email" link, so typos and fake addresses show up
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user });
   } catch (err) {
@@ -50,7 +54,7 @@ app.post('/api/signup', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const result = await pool.query('SELECT * FROM users WHERE lower(email) = lower($1) ORDER BY id LIMIT 1', [String(email || '').trim()]);
     if (result.rows.length === 0) return res.status(400).json({ error: 'Invalid credentials' });
 
     const user = result.rows[0];
@@ -105,7 +109,7 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
@@ -176,6 +180,67 @@ const jobsRoutes = require('./routes/jobs');
 const bidsRoutes = require('./routes/bids');
 const dashboardRoutes = require('./routes/dashboard');
 
+// ── Email confirmation ──
+// New accounts get a "confirm your email" link. The account works without it; the dashboards nag until it's done,
+// and the admin Users tab shows who has confirmed. While unconfirmed, the user can correct a mistyped address.
+const confirmPage = (res, title, text) => res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DirtBidder</title></head>
+<body style="margin:0;background:#1C1410;color:#F2EDE6;font-family:Arial,Helvetica,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center">
+<div style="max-width:420px;padding:32px 24px;text-align:center"><div style="font-size:26px;font-weight:900;margin-bottom:18px"><span style="color:#E8892A">Dirt</span>Bidder</div>
+<h1 style="font-size:20px;margin:0 0 12px">${title}</h1><p style="color:#C4A882;line-height:1.5;margin:0 0 22px">${text}</p>
+<a href="${process.env.FRONTEND_URL || 'https://www.dirtbidder.com'}/dirtbidder-login.html" style="display:inline-block;background:#E8892A;color:#1C1410;font-weight:700;text-decoration:none;padding:12px 22px;border-radius:4px">Go to DirtBidder</a></div></body></html>`);
+
+app.get('/api/confirm-email', async (req, res) => {
+  try {
+    const d = jwt.verify(String(req.query.t || ''), JWT_SECRET);
+    if (d.confirm !== 1) throw new Error('wrong link');
+    // The link only counts for the address it was sent to (a corrected address needs its own link)
+    const r = await pool.query(
+      'UPDATE users SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()) WHERE id = $1 AND lower(email) = $2 RETURNING id', [d.id, String(d.email || '').toLowerCase()]);
+    if (!r.rows[0]) throw new Error('address changed');
+    confirmPage(res, 'Your email is confirmed ✓', 'Thanks. Job alerts, bids and payment notices will come to this address.');
+  } catch (err) {
+    res.status(400);
+    confirmPage(res, 'That link didn’t work', 'It may be old, or the email on the account was changed. Log in and tap “Resend link” to get a new one.');
+  }
+});
+
+const lastConfirmSend = new Map(); // userId -> time, so the resend button can't be hammered
+const confirmThrottled = id => { const t = lastConfirmSend.get(id) || 0; if (Date.now() - t < 60000) return true; lastConfirmSend.set(id, Date.now()); return false; };
+
+app.post('/api/me/confirm-email', authMiddleware, async (req, res) => {
+  try {
+    const u = (await pool.query('SELECT email, email_confirmed_at FROM users WHERE id = $1', [req.user.id])).rows[0];
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    if (u.email_confirmed_at) return res.json({ confirmed: true });
+    if (confirmThrottled(req.user.id)) return res.status(429).json({ error: 'We just sent one. Give it a minute, and check your spam folder.' });
+    notify.confirmEmail(pool, req.user.id);
+    res.json({ sent: true, email: u.email });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Fix a mistyped address. Only while the email is still unconfirmed; after that, changes go through support.
+app.put('/api/me/email', authMiddleware, async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim();
+    if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255) return res.status(400).json({ error: 'That email address doesn’t look right.' });
+    const u = (await pool.query('SELECT email, email_confirmed_at FROM users WHERE id = $1', [req.user.id])).rows[0];
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    if (u.email_confirmed_at) return res.status(400).json({ error: 'Your email is already confirmed. To change it, reply to any DirtBidder email and we’ll help.' });
+    const taken = await pool.query('SELECT 1 FROM users WHERE lower(email) = lower($1) AND id <> $2', [email, req.user.id]);
+    if (taken.rows.length) return res.status(400).json({ error: 'Another account already uses that email.' });
+    await pool.query('UPDATE users SET email = $1 WHERE id = $2 AND email_confirmed_at IS NULL', [email, req.user.id]);
+    lastConfirmSend.set(req.user.id, Date.now());
+    notify.confirmEmail(pool, req.user.id);
+    res.json({ email, sent: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Turn off new-job emails from the link in the email (no login needed; the link is signed)
 const alertsOff = async (req, res) => {
   const page = (title, text) => res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DirtBidder</title></head>
@@ -186,7 +251,7 @@ const alertsOff = async (req, res) => {
   try {
     const d = jwt.verify(String(req.query.t || ''), JWT_SECRET);
     if (d.alerts !== 'off') throw new Error('wrong link');
-    await pool.query("UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || '{\"jobAlerts\": false}'::jsonb WHERE id = $1", [d.id]);
+    await pool.query("UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || '{\"jobAlerts\": false}'::jsonb, email_confirmed_at = COALESCE(email_confirmed_at, NOW()) WHERE id = $1", [d.id]);
     page('New-job emails are off', 'You won’t get an email when jobs are posted. You’ll still get emails about your own bids, jobs and payments. You can turn these back on any time in Settings.');
   } catch (err) {
     res.status(400);
@@ -428,6 +493,11 @@ async function runMigrations() {
     for (const sql of upgrades) {
       try { await pool.query(sql); } catch (e) { console.error('Upgrade step failed:', sql, '-', e.message); }
     }
+    // Email confirmation: the owner's own admin address counts as confirmed
+    try {
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email_confirmed_at TIMESTAMP');
+      await pool.query('UPDATE users SET email_confirmed_at = NOW() WHERE email_confirmed_at IS NULL AND lower(email) = ANY($1::text[])', [ADMIN_EMAILS]);
+    } catch (e) { console.error('Email-confirmation setup failed:', e.message); }
     // Sign-up used to allow a blank name (saved as a single space). Store those as empty so "Operator"/"Client" fallbacks show instead of nothing.
     try { await pool.query("UPDATE users SET name = '' WHERE name IS NOT NULL AND name <> '' AND btrim(name) = ''"); } catch (e) { console.error('Blank-name cleanup failed:', e.message); }
     // The owner's own accounts are left out of the HQ numbers, like test accounts (they still work normally on the site).

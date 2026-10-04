@@ -38,7 +38,8 @@ module.exports = (pool) => {
         'SELECT id, user_id FROM password_resets WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()', [hash(token)]);
       if (!r.rows[0]) return res.status(400).json({ error: 'This reset link is invalid or expired. Request a new one.' });
       const pw = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [pw, r.rows[0].user_id]);
+      // Getting here means they opened a link we emailed them, so the address works
+      await pool.query('UPDATE users SET password_hash = $1, email_confirmed_at = COALESCE(email_confirmed_at, NOW()) WHERE id = $2', [pw, r.rows[0].user_id]);
       await pool.query('UPDATE password_resets SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL', [r.rows[0].user_id]);
       res.json({ ok: true });
     } catch (err) {
