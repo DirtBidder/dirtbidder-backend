@@ -503,8 +503,11 @@ async function runMigrations() {
     try { await pool.query("UPDATE users SET name = '' WHERE name IS NOT NULL AND name <> '' AND btrim(name) = ''"); } catch (e) { console.error('Blank-name cleanup failed:', e.message); }
     // The owner's own accounts are left out of the HQ numbers, like test accounts (they still work normally on the site).
     // Auto-flagged: admin emails, any "+alias" of an admin email, and the plain address behind a +test / +op account.
+    // Also the owner's other personal accounts (OWNER_EMAILS in Railway, comma-separated; defaults below).
     // Anything this misses can be switched by hand on the admin Users tab (users.internal).
     try {
+      const OWNER_EMAILS = String(process.env.OWNER_EMAILS || 'dmaxwheeler79@gmail.com,wheeler.dan.m@outlook.com')
+        .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS internal BOOLEAN');
       const base = c => `lower(split_part(split_part(${c}, '@', 1), '+', 1) || '@' || split_part(${c}, '@', 2))`;
       const own = await pool.query(
@@ -512,8 +515,8 @@ async function runMigrations() {
          WHERE u.internal IS NULL AND u.email !~* '\\+(test|op)[0-9]*@'
            AND (${base('u.email')} = ANY($1::text[])
              OR EXISTS (SELECT 1 FROM users t WHERE t.email ~* '\\+(test|op)[0-9]*@' AND ${base('t.email')} = lower(u.email)))
-         RETURNING id`, [ADMIN_EMAILS]);
-      if (own.rowCount) console.log('Owner accounts left out of HQ:', own.rowCount);
+         RETURNING id, email`, [[...ADMIN_EMAILS, ...OWNER_EMAILS]]);
+      if (own.rowCount) console.log('Owner accounts left out of HQ:', own.rows.map(r => r.id + ' ' + r.email).join(', '));
     } catch (e) { console.error('Owner-account flag failed:', e.message); }
     // Jobs posted by test accounts (+test / +op emails) must never be public
     const hiddenTests = await pool.query(
