@@ -39,11 +39,16 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   });
 
   // Email a user the short "confirm your email" link (for people who signed up before confirmation existed, or who lost the email)
+  const lastAdminConfirm = new Map(); // userId -> time of the last confirm link sent from the admin page
   router.post('/users/:id/send-confirm', authMiddleware, adminOnly, async (req, res) => {
     try {
       const u = (await pool.query('SELECT id, email, email_confirmed_at FROM users WHERE id = $1', [parseInt(req.params.id, 10)])).rows[0];
       if (!u) return res.status(404).json({ error: 'User not found' });
       if (u.email_confirmed_at) return res.status(400).json({ error: 'Their email is already confirmed.' });
+      // A double-click sends two requests a split second apart. Only the first one sends an email.
+      const last = lastAdminConfirm.get(u.id) || 0;
+      if (Date.now() - last < 60000) return res.json({ sent: true, email: u.email, already: true });
+      lastAdminConfirm.set(u.id, Date.now());
       notify.confirmEmail(pool, u.id);
       res.json({ sent: true, email: u.email });
     } catch (err) {
