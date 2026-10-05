@@ -110,10 +110,22 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Agree to the house rule (jobs that start on DirtBidder are hired and paid on DirtBidder). Kept with the date.
+app.post('/api/me/rules', authMiddleware, async (req, res) => {
+  try {
+    if (req.body.agree !== true) return res.status(400).json({ error: 'Tap “I understand” to continue.' });
+    await pool.query('UPDATE users SET rules_ack_at = NOW() WHERE id = $1 AND rules_ack_at IS NULL', [req.user.id]);
+    res.json({ rules_ack: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -497,6 +509,7 @@ async function runMigrations() {
     // Email confirmation: the owner's own admin address counts as confirmed
     try {
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email_confirmed_at TIMESTAMP');
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS rules_ack_at TIMESTAMP'); // when they agreed to the house rule
       await pool.query('UPDATE users SET email_confirmed_at = NOW() WHERE email_confirmed_at IS NULL AND lower(email) = ANY($1::text[])', [ADMIN_EMAILS]);
     } catch (e) { console.error('Email-confirmation setup failed:', e.message); }
     // Sign-up used to allow a blank name (saved as a single space). Store those as empty so "Operator"/"Client" fallbacks show instead of nothing.

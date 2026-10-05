@@ -13,7 +13,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     try {
       const q = String(req.query.q || '').trim();
       const r = await pool.query(
-        `SELECT u.id, u.email, u.name, u.company_name, u.phone, u.role, u.created_at, u.suspended_at, u.suspended_reason, COALESCE(u.internal, false) AS internal, u.email_confirmed_at,
+        `SELECT u.id, u.email, u.name, u.company_name, u.phone, u.role, u.created_at, u.suspended_at, u.suspended_reason, COALESCE(u.internal, false) AS internal, u.email_confirmed_at, u.rules_ack_at,
            (SELECT COUNT(*) FROM jobs j WHERE j.client_id = u.id)::int AS jobs_posted,
            (SELECT COUNT(*) FROM bids b WHERE b.operator_id = u.id)::int AS bids_made,
            (SELECT COUNT(*) FROM disputes d JOIN jobs j ON j.id = d.job_id LEFT JOIN bids b ON b.job_id = j.id AND b.status = 'accepted'

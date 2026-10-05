@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { releaseJob } = require('../lib/release');
 const { scanFields, addFlag, checkClosePattern } = require('../lib/flags');
+const { needsRules, RULES_MSG } = require('../lib/account');
 const notify = require('../lib/notify');
 
 // Email with any "+alias" removed, e.g. dwheels+test1@gmail.com -> dwheels@gmail.com (SQL expression)
@@ -189,7 +190,17 @@ module.exports = (pool, authMiddleware) => {
       if (pay.rows.length) return res.status(400).json({ error: 'A payment is in progress on this job. Contact support@dirtbidder.com.' });
       const declined = await pool.query("UPDATE bids SET status = 'declined' WHERE job_id = $1 AND status = 'pending' RETURNING operator_id", [req.params.id]);
       await pool.query("UPDATE jobs SET status = 'closed' WHERE id = $1", [req.params.id]);
-      require('../lib/notify').jobClosed(pool, req.params.id, declined.rows.map(r => r.operator_id));
+      // Operators who were shown the site before the job was taken down: the likeliest place for a deal to move off DirtBidder.
+      // Everyone gets a friendly reminder, and it goes on the admin's Flagged list to look at.
+      const shown = await pool.query(
+        `SELECT s.operator_id, COALESCE(NULLIF(u.company_name, ''), NULLIF(btrim(u.name), ''), u.email) AS who
+         FROM job_location_shares s JOIN users u ON u.id = s.operator_id WHERE s.job_id = $1`, [req.params.id]).catch(() => ({ rows: [] }));
+      require('../lib/notify').jobClosed(pool, req.params.id, declined.rows.map(r => r.operator_id), shown.rows.map(r => r.operator_id));
+      if (shown.rows.length) {
+        const t = (await pool.query('SELECT title FROM jobs WHERE id = $1', [req.params.id])).rows[0];
+        addFlag(pool, { kind: 'pattern', userId: req.user.id, jobId: Number(req.params.id),
+          reason: `Closed "${t ? t.title : 'a job'}" without hiring, after sharing the job location with ${shown.rows.map(r => r.who).join(', ')}. Worth checking the work isn't being done off DirtBidder.` });
+      }
       if (declined.rows.length) checkClosePattern(pool, req.user.id).catch(e => console.error('pattern check:', e.message));
       res.json({ status: 'closed' });
     } catch (err) {
@@ -244,6 +255,7 @@ module.exports = (pool, authMiddleware) => {
         return res.json({ shared: false });
       }
       if (!['open', 'test'].includes(j.status)) return res.status(400).json({ error: 'This job already has a hired operator. They see the location automatically.' });
+      if (await needsRules(pool, req.user.id)) return res.status(428).json({ error: RULES_MSG, needs_rules: true });
       if (!j.site_address && (j.site_lat == null || j.site_lng == null))
         return res.status(400).json({ error: 'Add the job address or drop a GPS pin first (My Jobs), then share it.' });
       const talking = await pool.query(

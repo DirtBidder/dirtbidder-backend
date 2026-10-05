@@ -6,7 +6,7 @@ const { breakdown } = require('../utils/fees');
 const { createCheckout } = require('../lib/funding');
 const { hireBid } = require('../lib/hire');
 const notify = require('../lib/notify');
-const { operatorNotReady } = require('../lib/account');
+const { operatorNotReady, needsRules, RULES_MSG } = require('../lib/account');
 
 module.exports = (pool, authMiddleware) => {
   // Submit a bid on a job (operators only)
@@ -15,6 +15,7 @@ module.exports = (pool, authMiddleware) => {
       if (req.user.role !== 'operator') return res.status(403).json({ error: 'Only operator accounts can bid' });
       const notReady = await operatorNotReady(pool, req.user.id);
       if (notReady) return res.status(403).json({ error: notReady, not_ready: true });
+      if (await needsRules(pool, req.user.id)) return res.status(428).json({ error: RULES_MSG, needs_rules: true });
       const { amount, message, est_days, equipment } = req.body;
       const amt = Number(amount);
       if (!amt || amt <= 0) return res.status(400).json({ error: 'Enter a bid amount' });
@@ -69,6 +70,7 @@ module.exports = (pool, authMiddleware) => {
       if (!bid || bid.operator_id !== req.user.id) return res.status(404).json({ error: 'Bid not found' });
       const notReady = await operatorNotReady(pool, req.user.id);
       if (notReady) return res.status(403).json({ error: notReady, not_ready: true });
+      if (await needsRules(pool, req.user.id)) return res.status(428).json({ error: RULES_MSG, needs_rules: true });
       if (bid.status !== 'pending' || !['open', 'test'].includes(bid.job_status))
         return res.status(400).json({ error: bid.status === 'accepted' ? 'This bid was already accepted. Use a change request if the price needs to change.' : 'This bid can no longer be changed' });
 
