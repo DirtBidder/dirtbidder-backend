@@ -33,6 +33,12 @@ app.post('/api/signup', async (req, res) => {
     const existing = await pool.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Email already registered' });
 
+    // "Feature my company" (shoutouts): kept only as a clear yes from an operator, with the date. Anything else is left unanswered.
+    if (profile && typeof profile === 'object') {
+      if (role === 'operator' && profile.featureOk === true) profile.featureOkAt = new Date().toISOString();
+      else { delete profile.featureOk; delete profile.featureOkAt; }
+    }
+
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
       'INSERT INTO users (email, password_hash, role, name, phone, company_name, profile, terms_accepted_at, terms_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, email, role, name',
@@ -179,6 +185,12 @@ app.put('/api/me/profile', authMiddleware, async (req, res) => {
       const v = str(b[k], n); if (v !== undefined) patch[k] = v;
     }
     if (typeof b.jobAlerts === 'boolean') patch.jobAlerts = b.jobAlerts; // new-job emails on/off
+    // Shoutouts: OK to feature the company on DirtBidder's social media after a 4 or 5 star job. The date they said yes is kept.
+    if (typeof b.featureOk === 'boolean') {
+      if (b.featureOk && req.user.role !== 'operator') return res.status(400).json({ error: 'Shoutouts are for operator accounts.' });
+      patch.featureOk = b.featureOk;
+      patch.featureOkAt = b.featureOk ? new Date().toISOString() : null;
+    }
     const { scanFields, addFlag } = require('./lib/flags');
     const scan = scanFields({ bio: patch.bio, equipmentOther: patch.equipmentOther });
     if (patch.bio !== undefined) patch.bio = scan.cleaned.bio;
@@ -187,6 +199,7 @@ app.put('/api/me/profile', authMiddleware, async (req, res) => {
     const r = await pool.query(
       "UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || $1::jsonb WHERE id = $2 RETURNING profile",
       [JSON.stringify(patch), req.user.id]);
+    if (patch.featureOk === true) require('./lib/shoutouts').onOptIn(pool, req.user.id); // good reviews already waiting become ready to post
     res.json(r.rows[0].profile);
   } catch (err) {
     console.error(err);
@@ -507,6 +520,12 @@ async function runMigrations() {
          created_at TIMESTAMP DEFAULT NOW()
        )`,
       "CREATE INDEX IF NOT EXISTS change_orders_job_idx ON change_orders (job_id)",
+      // Shoutouts: did the client say the job was on time, and has the owner posted (or skipped) the shoutout for this review
+      "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS on_time BOOLEAN",
+      "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS shoutout_status VARCHAR(20)",
+      "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS shoutout_at TIMESTAMP",
+      "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS shoutout_text TEXT",
+      "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS shoutout_notified_at TIMESTAMP",
       "ALTER TABLE escrow_transactions ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
       "ALTER TABLE job_photos ADD COLUMN IF NOT EXISTS change_order_id INTEGER REFERENCES change_orders(id)",
       // Optional GPS pin for the job site (private, like the exact address)

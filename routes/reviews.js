@@ -9,6 +9,8 @@ module.exports = (pool, authMiddleware) => {
     try {
       const rating = parseInt(req.body.rating, 10);
       const comment = String(req.body.comment || '').trim().slice(0, 1000) || null;
+      // Optional yes/no: was the job finished on time? A shoutout only says "on time" when the client said so.
+      const onTime = typeof req.body.on_time === 'boolean' ? req.body.on_time : null;
       if (!(rating >= 1 && rating <= 5)) return res.status(400).json({ error: 'Pick 1 to 5 stars' });
       const j = await pool.query(
         `SELECT j.client_id, j.status, b.operator_id FROM jobs j
@@ -20,9 +22,10 @@ module.exports = (pool, authMiddleware) => {
       const dup = await pool.query('SELECT 1 FROM reviews WHERE job_id = $1 AND reviewer_id = $2', [req.params.id, req.user.id]);
       if (dup.rows.length) return res.status(400).json({ error: 'You already reviewed this job' });
       const r = await pool.query(
-        'INSERT INTO reviews (job_id, reviewer_id, reviewee_id, rating, comment) VALUES ($1, $2, $3, $4, $5) RETURNING id, rating, comment, created_at',
-        [req.params.id, req.user.id, job.operator_id, rating, comment]);
+        'INSERT INTO reviews (job_id, reviewer_id, reviewee_id, rating, comment, on_time) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, rating, comment, on_time, created_at',
+        [req.params.id, req.user.id, job.operator_id, rating, comment, onTime]);
       require('../lib/notify').newReview(pool, r.rows[0].id);
+      require('../lib/shoutouts').onReview(pool, r.rows[0].id); // 4+ stars and the operator said OK: tell the owner a post is ready
       res.json(r.rows[0]);
     } catch (err) {
       console.error(err);
@@ -36,7 +39,8 @@ module.exports = (pool, authMiddleware) => {
     if (!rep) return null;
     const u = await pool.query("SELECT COALESCE(NULLIF(company_name, ''), name) AS name, created_at, profile FROM users WHERE id = $1", [id]);
     const list = await pool.query(
-      `SELECT rv.rating, rv.comment, rv.created_at, j.title AS job_title, split_part(COALESCE(cu.name, ''), ' ', 1) AS reviewer
+      `SELECT rv.rating, rv.comment, rv.created_at, j.title AS job_title, split_part(COALESCE(cu.name, ''), ' ', 1) AS reviewer,
+              (rv.shoutout_status = 'posted') IS TRUE AS featured
        FROM reviews rv JOIN jobs j ON j.id = rv.job_id LEFT JOIN users cu ON cu.id = rv.reviewer_id
        WHERE rv.reviewee_id = $1 ORDER BY rv.created_at DESC LIMIT 50`, [id]);
     const pr = (u.rows[0] && u.rows[0].profile) || {};

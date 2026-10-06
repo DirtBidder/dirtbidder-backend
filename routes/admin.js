@@ -6,6 +6,7 @@ const notify = require('../lib/notify');
 const hq = require('../lib/hq');
 const { sendEmail, SITE } = require('../lib/email');
 const { isLive } = require('../lib/stripe');
+const shoutouts = require('../lib/shoutouts');
 
 module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // Search users by name, company, email or phone. Empty search = newest 50.
@@ -14,6 +15,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
       const q = String(req.query.q || '').trim();
       const r = await pool.query(
         `SELECT u.id, u.email, u.name, u.company_name, u.phone, u.role, u.created_at, u.suspended_at, u.suspended_reason, COALESCE(u.internal, false) AS internal, u.email_confirmed_at, u.rules_ack_at, u.terms_version, u.terms_accepted_at,
+           u.profile->>'featureOk' AS feature_ok, u.profile->>'featureOkAt' AS feature_ok_at,
            (SELECT COUNT(*) FROM jobs j WHERE j.client_id = u.id)::int AS jobs_posted,
            (SELECT COUNT(*) FROM bids b WHERE b.operator_id = u.id)::int AS bids_made,
            (SELECT COUNT(*) FROM disputes d JOIN jobs j ON j.id = d.job_id LEFT JOIN bids b ON b.job_id = j.id AND b.status = 'accepted'
@@ -367,6 +369,52 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                 OR o.email ILIKE $2 OR c.name ILIKE $2 OR c.email ILIKE $2)
          ORDER BY t.last_at DESC NULLS LAST LIMIT 200`, [q, like]);
       res.json({ conversations: r.rows });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ── Shoutouts: ready-made social media posts for operators who finished a job with 4 or 5 stars ──
+  // ready = the operator said OK and it hasn't been posted; waiting = good review, but the operator hasn't said OK yet.
+  // Test accounts are left out unless ?test=1.
+  router.get('/shoutouts', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      res.json({ ...(await shoutouts.list(pool, { withTest: req.query.test === '1' })), facebook_url: shoutouts.FACEBOOK_URL, min_stars: shoutouts.MIN_STARS });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // The owner posted it: keep the words he used and tell the operator they were featured (one email, only the first time)
+  router.post('/shoutouts/:id/posted', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const row = await shoutouts.one(pool, parseInt(req.params.id, 10));
+      if (!row) return res.status(404).json({ error: 'That review can’t get a shoutout (it may have been refunded, or the account was suspended).' });
+      if (!row.feature_ok) return res.status(400).json({ error: 'This operator hasn’t said it’s OK to feature their company, so don’t post it yet.' });
+      const text = String(req.body.text || '').trim().slice(0, 3000) || row.text;
+      const r = await pool.query(
+        "UPDATE reviews SET shoutout_status = 'posted', shoutout_at = NOW(), shoutout_text = $1 WHERE id = $2 AND shoutout_status IS DISTINCT FROM 'posted' RETURNING id",
+        [text, row.id]);
+      if (r.rows.length && req.body.tell_operator !== false) notify.shoutoutPosted(pool, row.id);
+      res.json({ ok: true, already: !r.rows.length });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Not posting this one (takes it off the list), or put it back
+  router.post('/shoutouts/:id/skip', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const undo = req.body.undo === true;
+      const r = await pool.query(undo
+        ? "UPDATE reviews SET shoutout_status = NULL, shoutout_at = NULL WHERE id = $1 AND shoutout_status = 'skipped' RETURNING id"
+        : "UPDATE reviews SET shoutout_status = 'skipped', shoutout_at = NOW() WHERE id = $1 AND shoutout_status IS NULL RETURNING id",
+        [parseInt(req.params.id, 10)]);
+      if (!r.rows.length) return res.status(400).json({ error: undo ? 'That one isn’t on the skipped list.' : 'That one was already posted or skipped.' });
+      res.json({ ok: true });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
