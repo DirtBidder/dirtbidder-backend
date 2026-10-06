@@ -209,6 +209,32 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Client adds more detail to a job that's still open (size, depth, what's there now). It's added under the
+  // original description with the date, so bidders can see what changed. Same contact-info rules as a new post.
+  router.put('/:id/details', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id, status, description FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['open', 'test'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is no longer open, so its details can’t be changed.' });
+      const note = String(req.body.note || '').replace(/\s+\n/g, '\n').trim();
+      if (note.length < 5) return res.status(400).json({ error: 'Type the details you want bidders to see.' });
+      if (note.length > 1500) return res.status(400).json({ error: 'That’s too long. Keep it under 1,500 characters.' });
+      const before = String(j.rows[0].description || '').trim();
+      if (before.length + note.length > 6000) return res.status(400).json({ error: 'This job’s description is full. Answer in Messages instead.' });
+      const scan = scanFields({ description: note });
+      const day = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Chicago' });
+      const description = (before ? before + '\n\n' : '') + `Added ${day}: ${scan.cleaned.description}`;
+      await pool.query('UPDATE jobs SET description = $1 WHERE id = $2', [description, req.params.id]);
+      if (scan.reasons.length) addFlag(pool, { kind: 'job', userId: req.user.id, jobId: Number(req.params.id),
+        reason: 'Job details ' + scan.reasons.join(', '), details: scan.original });
+      res.json({ description });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Client adds or changes the exact job-site address (private: only the hired operator ever sees it)
   router.put('/:id/address', authMiddleware, async (req, res) => {
     try {
