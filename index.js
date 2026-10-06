@@ -41,6 +41,7 @@ app.post('/api/signup', async (req, res) => {
     );
 
     const user = result.rows[0];
+    if (req.body.accepted_terms === true) pool.query('INSERT INTO terms_acceptances (user_id, version) VALUES ($1, $2)', [user.id, TERMS_VERSION]).catch(e => console.error('terms record:', e.message));
     notify.confirmEmail(pool, user.id, { welcome: true }); // welcome note + "confirm your email" link, so typos and fake addresses show up
     notify.newSignup(pool, user.id); // tell the owner
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -110,10 +111,29 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack, terms_version FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    // Have they agreed to the Terms as they stand today? If not, the dashboard asks them to (once per version).
+    result.rows[0].terms_current = result.rows[0].terms_version === TERMS_VERSION;
+    result.rows[0].terms_version_current = TERMS_VERSION;
     result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Agree to the current Terms of Service and Privacy Policy (asked again whenever TERMS_VERSION changes).
+// Every acceptance is kept with its date and version in terms_acceptances.
+app.post('/api/me/terms', authMiddleware, async (req, res) => {
+  try {
+    if (req.body.agree !== true) return res.status(400).json({ error: 'Tap “I agree” to continue.' });
+    // The page says which version it showed. If the Terms changed again since, don't record an agreement to text they didn't see.
+    if (req.body.version && req.body.version !== TERMS_VERSION) return res.status(409).json({ error: 'The Terms were just updated again. Refresh the page to see the latest version.', stale: true });
+    const r = await pool.query('UPDATE users SET terms_accepted_at = NOW(), terms_version = $1 WHERE id = $2 AND terms_version IS DISTINCT FROM $1 RETURNING id', [TERMS_VERSION, req.user.id]);
+    if (r.rows.length) await pool.query('INSERT INTO terms_acceptances (user_id, version) VALUES ($1, $2)', [req.user.id, TERMS_VERSION]);
+    res.json({ terms_current: true, version: TERMS_VERSION });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -510,6 +530,14 @@ async function runMigrations() {
     try {
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email_confirmed_at TIMESTAMP');
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS rules_ack_at TIMESTAMP'); // when they agreed to the house rule
+      // A dated record of every time someone agreed to the Terms, and which version (sign-up, and again after each update)
+      await pool.query(`CREATE TABLE IF NOT EXISTS terms_acceptances (
+        id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        version VARCHAR(20) NOT NULL, accepted_at TIMESTAMP NOT NULL DEFAULT NOW())`);
+      await pool.query(`INSERT INTO terms_acceptances (user_id, version, accepted_at)
+        SELECT u.id, u.terms_version, u.terms_accepted_at FROM users u
+        WHERE u.terms_accepted_at IS NOT NULL AND u.terms_version IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM terms_acceptances t WHERE t.user_id = u.id AND t.version = u.terms_version)`);
       await pool.query('UPDATE users SET email_confirmed_at = NOW() WHERE email_confirmed_at IS NULL AND lower(email) = ANY($1::text[])', [ADMIN_EMAILS]);
     } catch (e) { console.error('Email-confirmation setup failed:', e.message); }
     // Sign-up used to allow a blank name (saved as a single space). Store those as empty so "Operator"/"Client" fallbacks show instead of nothing.
