@@ -341,6 +341,38 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // Conversations: every client/operator thread (one per job + operator), newest first, including
+  // questions asked before any bid. The admin opens one read-only on the Messages page.
+  router.get('/conversations', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      const like = '%' + q.replace(/[%_]/g, m => '\\' + m) + '%';
+      const r = await pool.query(
+        `SELECT t.job_id, t.operator_id, t.messages, t.hidden, t.last_at,
+                (SELECT x.body FROM messages x WHERE x.job_id = t.job_id AND x.operator_id = t.operator_id ORDER BY x.id DESC LIMIT 1) AS last_body,
+                (SELECT x.sender_id FROM messages x WHERE x.job_id = t.job_id AND x.operator_id = t.operator_id ORDER BY x.id DESC LIMIT 1) AS last_sender_id,
+                j.title AS job_title, j.status AS job_status, j.location AS job_location,
+                c.id AS client_id, c.name AS client_name, c.email AS client_email,
+                o.name AS operator_name, o.company_name AS operator_company, o.email AS operator_email,
+                (SELECT b.amount FROM bids b WHERE b.job_id = t.job_id AND b.operator_id = t.operator_id ORDER BY b.id DESC LIMIT 1) AS bid_amount,
+                (SELECT b.status FROM bids b WHERE b.job_id = t.job_id AND b.operator_id = t.operator_id ORDER BY b.id DESC LIMIT 1) AS bid_status,
+                EXISTS (SELECT 1 FROM job_location_shares s WHERE s.job_id = t.job_id AND s.operator_id = t.operator_id) AS location_shared
+         FROM (SELECT m.job_id, m.operator_id, COUNT(*)::int AS messages,
+                      COUNT(*) FILTER (WHERE m.original_body IS NOT NULL)::int AS hidden, MAX(m.created_at) AS last_at
+               FROM messages m GROUP BY m.job_id, m.operator_id) t
+         JOIN jobs j ON j.id = t.job_id
+         JOIN users o ON o.id = t.operator_id
+         LEFT JOIN users c ON c.id = j.client_id
+         WHERE ($1 = '' OR j.title ILIKE $2 OR j.location ILIKE $2 OR o.name ILIKE $2 OR o.company_name ILIKE $2
+                OR o.email ILIKE $2 OR c.name ILIKE $2 OR c.email ILIKE $2)
+         ORDER BY t.last_at DESC NULLS LAST LIMIT 200`, [q, like]);
+      res.json({ conversations: r.rows });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Flagged list: bids/posts/profiles with contact info, client reports, suspicious patterns
   router.get('/flags', authMiddleware, adminOnly, async (req, res) => {
     try {

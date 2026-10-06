@@ -16,7 +16,7 @@ const pool = new Pool({
 });
 
 // Date of the Terms of Service / Privacy Policy users agree to at signup
-const TERMS_VERSION = '2026-09-29';
+const TERMS_VERSION = '2026-10-06';
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 
 // Signup
