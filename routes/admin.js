@@ -113,6 +113,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   });
 
   // HQ: the owner's overview — totals, money, weekly trends and recent activity.
+  // Suspended accounts are left out of the client/operator totals and sign-up counts (they're shown as their own number).
   // Test accounts (+test / +op emails) and their jobs/bids/payments are left out unless ?test=1.
   router.get('/hq', authMiddleware, adminOnly, async (req, res) => {
     try {
@@ -125,8 +126,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
 
       const [users, jobs, bids, money, open, weekly, activity, hidden] = await Promise.all([
         pool.query(
-          `SELECT u.role, COUNT(*)::int AS total,
-                  COUNT(*) FILTER (WHERE u.created_at > NOW() - INTERVAL '7 days')::int AS new_7d,
+          `SELECT u.role, COUNT(*) FILTER (WHERE u.suspended_at IS NULL)::int AS total,
+                  COUNT(*) FILTER (WHERE u.suspended_at IS NULL AND u.created_at > NOW() - INTERVAL '7 days')::int AS new_7d,
                   COUNT(*) FILTER (WHERE u.suspended_at IS NOT NULL)::int AS suspended
            FROM users u WHERE ${realUser('u')} GROUP BY u.role`, p),
         pool.query(
@@ -156,7 +157,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         pool.query(
           `WITH w AS (SELECT generate_series(date_trunc('week', NOW()) - INTERVAL '7 weeks', date_trunc('week', NOW()), INTERVAL '1 week') AS wk)
            SELECT to_char(w.wk, 'YYYY-MM-DD') AS week,
-             (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND ${realUser('u')})::int AS signups,
+             (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND u.suspended_at IS NULL AND ${realUser('u')})::int AS signups,
              (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE date_trunc('week', j.created_at) = w.wk AND ${realJob('j', 'c')})::int AS jobs,
              (SELECT COUNT(*) FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
                 WHERE date_trunc('week', b.created_at) = w.wk AND ${realJob('j', 'c')} AND ${realUser('o')})::int AS bids,
@@ -166,7 +167,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         pool.query(
           `SELECT * FROM (
              SELECT 'signup' AS kind, u.created_at AS at, COALESCE(NULLIF(u.company_name, ''), u.name, u.email) AS who, u.role AS detail, NULL::numeric AS amount
-               FROM users u WHERE ${realUser('u')}
+               FROM users u WHERE ${realUser('u')} AND u.suspended_at IS NULL
              UNION ALL
              SELECT 'job', j.created_at, c.name, j.title, j.budget FROM jobs j JOIN users c ON c.id = j.client_id WHERE ${realJob('j', 'c')}
              UNION ALL

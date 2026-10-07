@@ -3,6 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const notify = require('./lib/notify');
+const { fakeSignup } = require('./lib/signupCheck');
 const { Pool } = require('pg');
 require('dotenv').config();
 
@@ -29,6 +30,11 @@ app.post('/api/signup', async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
     if (!name) return res.status(400).json({ error: 'Please enter your name' });
     if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'That email address doesn’t look right. Check it and try again.' });
+    const fake = fakeSignup({ name, phone, email });
+    if (fake) {
+      console.log('[signup refused]', fake.field, '-', fake.field === 'email' ? email.split('@').pop() : fake.field === 'name' ? name : String(phone));
+      return res.status(400).json({ error: fake.error, field: fake.field });
+    }
 
     const existing = await pool.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Email already registered' });
@@ -578,6 +584,19 @@ async function runMigrations() {
          RETURNING id, email`, [[...ADMIN_EMAILS, ...OWNER_EMAILS]]);
       if (own.rowCount) console.log('Owner accounts left out of HQ:', own.rows.map(r => r.id + ' ' + r.email).join(', '));
     } catch (e) { console.error('Owner-account flag failed:', e.message); }
+    // One-time (Oct 7 2026): a fake client "Test Test" signed up with a throwaway address and a made-up phone.
+    // Suspended at the owner's request so it can't post a junk job (a new job emails every operator).
+    // No suspension email is sent, since the address is fake. It skips an account that is already suspended.
+    // If this account is ever restored by hand on the admin Users tab, delete this block first or the next deploy suspends it again.
+    try {
+      const gone = await pool.query(
+        `UPDATE users SET suspended_at = NOW(), suspended_reason = 'Fake sign-up: placeholder name, made-up phone, throwaway email'
+         WHERE lower(email) = 'xicaye4076@calirona.com' AND suspended_at IS NULL AND suspended_reason IS NULL AND role = 'client' RETURNING id`);
+      if (gone.rowCount) {
+        const closed = await pool.query("UPDATE jobs SET status = 'closed' WHERE client_id = $1 AND status IN ('open', 'test') RETURNING id", [gone.rows[0].id]);
+        console.log('Suspended fake sign-up: user', gone.rows[0].id, '· jobs closed:', closed.rowCount);
+      }
+    } catch (e) { console.error('Fake sign-up suspend failed:', e.message); }
     // Jobs posted by test accounts (+test / +op emails) must never be public
     const hiddenTests = await pool.query(
       "UPDATE jobs SET status = 'test' WHERE status = 'open' AND client_id IN (SELECT id FROM users WHERE email ~* '\\+(test|op)[0-9]*@') RETURNING id");
