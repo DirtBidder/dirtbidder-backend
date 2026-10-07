@@ -628,15 +628,18 @@ async function runMigrations() {
     console.error('Migration error:', err);
   }
 }
-runMigrations().then(() => require('./lib/hq').migrate(pool)).then(() => {
+runMigrations().then(() => require('./lib/hq').migrate(pool))
+  .then(() => require('./lib/confirmReminders').migrate(pool).catch(err => console.error('Confirm reminder setup failed:', err.message))).then(() => {
   // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours,
-  // check bank payments that are still clearing, and send the owner's morning report once a day (from 7am Central)
+  // check bank payments that are still clearing, send the owner's morning report once a day (from 7am Central),
+  // and remind people who signed up but never confirmed their email (2 days and 6 days after sign-up, daytime only)
   const { autoReleaseDueJobs } = require('./lib/release');
   const hq = require('./lib/hq');
   const tick = () => {
     autoReleaseDueJobs(pool).catch(err => console.error('Auto-release error:', err.message));
     hq.reportTick(pool).catch(err => console.error('Daily report error:', err.message));
     require('./lib/funding').checkProcessing(pool).catch(err => console.error('Bank payment check error:', err.message));
+    require('./lib/confirmReminders').run(pool).catch(err => console.error('Confirm reminder error:', err.message));
   };
   tick();
   setInterval(tick, 15 * 60 * 1000);
