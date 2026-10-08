@@ -643,6 +643,8 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
   };
   tick();
   setInterval(tick, 15 * 60 * 1000);
+  // One-time owner emails (each person gets each one once, ever)
+  require('./lib/broadcasts').runPending(pool).catch(err => console.error('Broadcast error:', err.message));
 });
 
 const PORT = process.env.PORT || 3000;
