@@ -9,6 +9,39 @@ const { isLive } = require('../lib/stripe');
 const shoutouts = require('../lib/shoutouts');
 
 module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
+  // The owner's own test accounts: +test / +op addresses of the owner's emails (dwheels7943+test1@gmail.com and so on).
+  // The owner's Testing box lists them, and one tap signs the owner in as one of them. Real users' accounts can never be opened this way.
+  const jwt = require('jsonwebtoken');
+  const testBases = () => [...new Set([...ADMIN_EMAILS,
+    ...String(process.env.OWNER_EMAILS || 'dmaxwheeler79@gmail.com,wheeler.dan.m@outlook.com').split(','),
+    ...String(process.env.TEST_ACCOUNT_BASES || 'dwheels7943@gmail.com').split(',')].map(e => String(e).trim().toLowerCase()).filter(Boolean))];
+  const BASE = c => `lower(split_part(split_part(${c}, '@', 1), '+', 1) || '@' || split_part(${c}, '@', 2))`;
+  const TEST_WHERE = `u.email ~* '\\+(test|op)[0-9]*@' AND u.suspended_at IS NULL AND ${BASE('u.email')} = ANY($1::text[])`;
+
+  router.get('/test-accounts', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query(`SELECT u.id, u.email, u.name, u.company_name, u.role FROM users u WHERE ${TEST_WHERE} ORDER BY (u.role = 'operator'), u.id`, [testBases()]);
+      res.json({ accounts: r.rows });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  router.post('/test-accounts/:id/login', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const r = await pool.query(`SELECT u.id, u.email, u.role FROM users u WHERE u.id = $2 AND ${TEST_WHERE}`, [testBases(), parseInt(req.params.id, 10)]);
+      const u = r.rows[0];
+      if (!u) return res.status(404).json({ error: 'That isn’t one of your test accounts' });
+      const token = jwt.sign({ id: u.id, role: u.role }, process.env.JWT_SECRET || 'change_this_secret', { expiresIn: '12h' });
+      console.log('[admin] owner', req.user.id, 'opened test account', u.id, u.email);
+      res.json({ token, role: u.role, email: u.email });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Search users by name, company, email or phone. Empty search = newest 50.
   router.get('/users', authMiddleware, adminOnly, async (req, res) => {
     try {
