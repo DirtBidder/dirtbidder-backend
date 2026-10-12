@@ -7,6 +7,7 @@ const hq = require('../lib/hq');
 const { sendEmail, SITE } = require('../lib/email');
 const { isLive } = require('../lib/stripe');
 const shoutouts = require('../lib/shoutouts');
+const { TEST, isTestEmail, VIEW_ONLY_MSG } = require('../lib/viewer');
 
 module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // The owner's own test accounts: +test / +op addresses of the owner's emails (dwheels7943+test1@gmail.com and so on).
@@ -20,6 +21,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
 
   router.get('/test-accounts', authMiddleware, adminOnly, async (req, res) => {
     try {
+      if (req.user.viewer) return res.json({ accounts: [] });
       const r = await pool.query(`SELECT u.id, u.email, u.name, u.company_name, u.role FROM users u WHERE ${TEST_WHERE} ORDER BY (u.role = 'operator'), u.id`, [testBases()]);
       res.json({ accounts: r.rows });
     } catch (err) {
@@ -58,9 +60,10 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
            (SELECT COALESCE(json_agg(json_build_object('reason', w.reason, 'created_at', w.created_at) ORDER BY w.id DESC), '[]'::json)
               FROM user_warnings w WHERE w.user_id = u.id) AS warnings
          FROM users u
-         WHERE $1 = '' OR u.email ILIKE $2 OR u.name ILIKE $2 OR u.company_name ILIKE $2 OR u.phone ILIKE $2
+         WHERE ($1 = '' OR u.email ILIKE $2 OR u.name ILIKE $2 OR u.company_name ILIKE $2 OR u.phone ILIKE $2)
+           AND (NOT $3::boolean OR ${TEST('u')})
          ORDER BY u.created_at DESC NULLS LAST, u.id DESC LIMIT 50`,
-        [q, '%' + q.replace(/[%_]/g, m => '\\' + m) + '%']);
+        [q, '%' + q.replace(/[%_]/g, m => '\\' + m) + '%', !!req.user.viewer]);
       const rep = await getReputation(pool, r.rows.filter(u => u.role === 'operator').map(u => u.id));
       r.rows.forEach(u => {
         u.reputation = rep[u.id] || null;
@@ -150,11 +153,14 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // Test accounts (+test / +op emails) and their jobs/bids/payments are left out unless ?test=1.
   router.get('/hq', authMiddleware, adminOnly, async (req, res) => {
     try {
-      const withTest = req.query.test === '1';
+      const viewer = !!req.user.viewer;
+      const withTest = viewer || req.query.test === '1';
       // Not a real outside user: a test account (+test / +op email) or one of the owner's own accounts
       const T = a => `(${a}.email ~* '\\+(test|op)[0-9]*@' OR COALESCE(${a}.internal, false))`;
-      const realUser = a => `($1::boolean OR NOT ${T(a)})`;
-      const realJob = (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT COALESCE(${j}.internal, false) AND NOT ${T(c)}))`;
+      // A view-only login sees test accounts and test jobs only, never real customers
+      const realUser = viewer ? a => TEST(a) : a => `($1::boolean OR NOT ${T(a)})`;
+      const realJob = viewer ? (j, c) => `(($1::boolean OR true) AND (${j}.status = 'test' OR ${TEST(c)}))`
+        : (j, c) => `($1::boolean OR (${j}.status <> 'test' AND NOT COALESCE(${j}.internal, false) AND NOT ${T(c)}))`;
       const p = [withTest];
 
       const [users, jobs, bids, money, open, weekly, activity, hidden] = await Promise.all([
@@ -183,8 +189,11 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                   COUNT(*) FILTER (WHERE e.status IN ('refunded', 'refund_needed'))::int AS refunds
            FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id JOIN users c ON c.id = j.client_id
            WHERE ${realJob('j', 'c')}`, p),
-        pool.query(
-          `SELECT (SELECT COUNT(*) FROM disputes WHERE status = 'open')::int AS disputes,
+        pool.query(viewer
+          ? `SELECT (SELECT COUNT(*) FROM disputes d JOIN jobs j ON j.id = d.job_id JOIN users c ON c.id = j.client_id WHERE d.status = 'open' AND ${TEST('c')})::int AS disputes,
+                    (SELECT COUNT(*) FROM flags f JOIN users u ON u.id = f.user_id WHERE f.status = 'open' AND ${TEST('u')})::int AS flags,
+                    (SELECT COUNT(*) FROM payment_waitlist w JOIN users u ON u.id = w.user_id WHERE w.notified_at IS NULL AND ${TEST('u')})::int AS waiting_to_pay`
+          : `SELECT (SELECT COUNT(*) FROM disputes WHERE status = 'open')::int AS disputes,
                   (SELECT COUNT(*) FROM flags WHERE status = 'open')::int AS flags,
                   (SELECT COUNT(*) FROM payment_waitlist WHERE notified_at IS NULL)::int AS waiting_to_pay`),
         pool.query(
@@ -220,13 +229,15 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                   (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE j.status = 'test' OR ${T('c')})::int AS jobs`)
       ]);
 
-      const visitors = await hq.visitorStats(pool).catch(() => ({ today: 0, last_7d: 0, views_7d: 0, top_referrers: [], weekly: {} }));
+      const noVisitors = { today: 0, last_7d: 0, views_7d: 0, top_referrers: [], weekly: {} };
+      const visitors = viewer ? noVisitors : await hq.visitorStats(pool).catch(() => noVisitors);
       weekly.rows.forEach(w => { w.visitors = visitors.weekly[w.week] || 0; });
       delete visitors.weekly;
-      const tasks = await pool.query('SELECT id, title, done_at FROM hq_tasks ORDER BY (done_at IS NOT NULL), sort, id').catch(() => ({ rows: [] }));
+      const tasks = viewer ? { rows: [] } : await pool.query('SELECT id, title, done_at FROM hq_tasks ORDER BY (done_at IS NOT NULL), sort, id').catch(() => ({ rows: [] }));
       const byRole = Object.fromEntries(users.rows.map(r => [r.role, r]));
       const jobsBy = Object.fromEntries(jobs.rows.map(r => [r.status, r.n]));
       res.json({
+        view_only: viewer,
         with_test: withTest,
         hidden_test: hidden.rows[0],
         users: {
@@ -271,6 +282,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   router.get('/waitlist', authMiddleware, adminOnly, async (req, res) => {
     try {
       const r = await waitlistRows();
+      if (req.user.viewer) r.rows = r.rows.filter(x => isTestEmail(x.email));
       res.json({ live: isLive, waiting: r.rows.filter(x => !x.notified_at).length, rows: r.rows });
     } catch (err) {
       console.error(err);
@@ -367,9 +379,12 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
          WHERE ($1 = '' OR b.status = $1)
            AND ($2 = '' OR j.title ILIKE $3 OR j.location ILIKE $3 OR o.name ILIKE $3 OR o.company_name ILIKE $3
                 OR o.email ILIKE $3 OR c.name ILIKE $3 OR c.email ILIKE $3)
+           AND (NOT $4::boolean OR (${TEST('o')} AND ${TEST('c')}))
          ORDER BY b.created_at DESC NULLS LAST, b.id DESC LIMIT 200`,
-        [status, q, like]);
-      const counts = await pool.query('SELECT status, COUNT(*)::int AS n FROM bids GROUP BY status');
+        [status, q, like, !!req.user.viewer]);
+      const counts = await pool.query(
+        `SELECT b.status, COUNT(*)::int AS n FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users o ON o.id = b.operator_id LEFT JOIN users c ON c.id = j.client_id
+         WHERE NOT $1::boolean OR (${TEST('o')} AND ${TEST('c')}) GROUP BY b.status`, [!!req.user.viewer]);
       res.json({ bids: r.rows, counts: Object.fromEntries(counts.rows.map(c => [c.status || 'pending', c.n])) });
     } catch (err) {
       console.error(err);
@@ -401,7 +416,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
          LEFT JOIN users c ON c.id = j.client_id
          WHERE ($1 = '' OR j.title ILIKE $2 OR j.location ILIKE $2 OR o.name ILIKE $2 OR o.company_name ILIKE $2
                 OR o.email ILIKE $2 OR c.name ILIKE $2 OR c.email ILIKE $2)
-         ORDER BY t.last_at DESC NULLS LAST LIMIT 200`, [q, like]);
+           AND (NOT $3::boolean OR (${TEST('o')} AND ${TEST('c')}))
+         ORDER BY t.last_at DESC NULLS LAST LIMIT 200`, [q, like, !!req.user.viewer]);
       res.json({ conversations: r.rows });
     } catch (err) {
       console.error(err);
@@ -414,7 +430,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   // Test accounts are left out unless ?test=1.
   router.get('/shoutouts', authMiddleware, adminOnly, async (req, res) => {
     try {
-      res.json({ ...(await shoutouts.list(pool, { withTest: req.query.test === '1' })), facebook_url: shoutouts.FACEBOOK_URL, min_stars: shoutouts.MIN_STARS });
+      res.json({ ...(await shoutouts.list(pool, { withTest: req.user.viewer || req.query.test === '1', onlyTest: !!req.user.viewer })), facebook_url: shoutouts.FACEBOOK_URL, min_stars: shoutouts.MIN_STARS });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
@@ -466,7 +482,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                 (SELECT COUNT(*) FROM user_warnings w WHERE w.user_id = f.user_id)::int AS warnings
          FROM flags f JOIN users u ON u.id = f.user_id
          LEFT JOIN jobs j ON j.id = f.job_id LEFT JOIN users ru ON ru.id = f.reporter_id
-         WHERE f.status = $1 ORDER BY f.created_at DESC LIMIT 100`, [status]);
+         WHERE f.status = $1 AND (NOT $2::boolean OR ${TEST('u')}) ORDER BY f.created_at DESC LIMIT 100`, [status, !!req.user.viewer]);
       res.json(r.rows);
     } catch (err) {
       console.error(err);

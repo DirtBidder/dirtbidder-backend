@@ -85,6 +85,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Auth middleware
+const { VIEW_ONLY_MSG } = require('./lib/viewer');
 const SUSPENDED_MSG = 'This account has been suspended. If you think this is a mistake, email support@dirtbidder.com.';
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -97,6 +98,13 @@ async function authMiddleware(req, res, next) {
     const u = await pool.query('SELECT suspended_at FROM users WHERE id = $1', [decoded.id]);
     if (!u.rows[0]) return res.status(401).json({ error: 'Account not found' });
     if (u.rows[0].suspended_at) return res.status(401).json({ error: SUSPENDED_MSG, suspended: true });
+    // View-only accounts (the lawyer's login): reading is fine, any change anywhere on the site is refused
+    const v = await pool.query('SELECT admin_viewer FROM users WHERE id = $1', [decoded.id]).catch(() => ({ rows: [] }));
+    if (v.rows[0] && v.rows[0].admin_viewer) {
+      decoded.viewer = true;
+      if (req.method !== 'GET' && req.method !== 'HEAD' && req.originalUrl.split('?')[0] !== '/api/me/terms')
+        return res.status(403).json({ error: VIEW_ONLY_MSG, view_only: true });
+    }
   } catch (err) {
     if (err.code !== '42703') return res.status(500).json({ error: 'Server error' }); // 42703: column not added yet (first seconds after a deploy)
   }
@@ -111,7 +119,9 @@ async function adminOnly(req, res, next) {
     const r = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
     const email = ((r.rows[0] && r.rows[0].email) || '').toLowerCase();
     if (req.user.role === 'owner' || ADMIN_EMAILS.includes(email)) return next();
-    res.status(403).json({ error: 'Admin access only' });
+    // View-only admins: may look (GET only) and only ever see test data (each admin route checks req.user.viewer)
+    if (req.user.viewer && req.method === 'GET') return next();
+    res.status(403).json({ error: req.user.viewer ? VIEW_ONLY_MSG : 'Admin access only' });
   } catch (err) { res.status(500).json({ error: 'Server error' }); }
 }
 
@@ -123,12 +133,12 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack, terms_version FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack, terms_version, COALESCE(admin_viewer, false) AS is_viewer FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     // Have they agreed to the Terms as they stand today? If not, the dashboard asks them to (once per version).
     result.rows[0].terms_current = result.rows[0].terms_version === TERMS_VERSION;
     result.rows[0].terms_version_current = TERMS_VERSION;
-    result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase());
+    result.rows[0].is_admin = result.rows[0].role === 'owner' || ADMIN_EMAILS.includes(String(result.rows[0].email || '').toLowerCase()) || result.rows[0].is_viewer;
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -577,6 +587,7 @@ async function runMigrations() {
       const OWNER_EMAILS = String(process.env.OWNER_EMAILS || 'dmaxwheeler79@gmail.com,wheeler.dan.m@outlook.com')
         .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS internal BOOLEAN');
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_viewer BOOLEAN'); // view-only admin (lawyer)
       const base = c => `lower(split_part(split_part(${c}, '@', 1), '+', 1) || '@' || split_part(${c}, '@', 2))`;
       const own = await pool.query(
         `UPDATE users u SET internal = true
@@ -648,6 +659,8 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
   setInterval(tick, 15 * 60 * 1000);
   // One-time owner emails (each person gets each one once, ever)
   require('./lib/broadcasts').runPending(pool).catch(err => console.error('Broadcast error:', err.message));
+  // The lawyer's view-only and test logins (only if LAWYER_DEMO_PASSWORD is set in Railway)
+  require('./lib/lawyerDemo').setup(pool).catch(err => console.error('Lawyer demo setup error:', err.message));
 });
 
 const PORT = process.env.PORT || 3000;

@@ -27,6 +27,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
        WHERE j.id = $1`, [jobId]);
     return r.rows[0] || null;
   }
+  // Full admins only (a view-only login is not an admin here)
   const isAdmin = async userId => {
     const r = await pool.query('SELECT email, role FROM users WHERE id = $1', [userId]);
     const u = r.rows[0];

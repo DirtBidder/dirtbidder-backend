@@ -9,10 +9,13 @@ const notify = require('../lib/notify');
 const { operatorNotReady } = require('../lib/account');
 
 module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
+  // 'admin' (full), 'viewer' (view-only login: test conversations only), or false
   const isAdmin = async userId => {
-    const r = await pool.query('SELECT email, role FROM users WHERE id = $1', [userId]);
+    const r = await pool.query('SELECT email, role, COALESCE(admin_viewer, false) AS viewer FROM users WHERE id = $1', [userId]);
     const u = r.rows[0];
-    return !!u && (u.role === 'owner' || ADMIN_EMAILS.includes(String(u.email || '').toLowerCase()));
+    if (!u) return false;
+    if (u.role === 'owner' || ADMIN_EMAILS.includes(String(u.email || '').toLowerCase())) return 'admin';
+    return u.viewer ? 'viewer' : false;
   };
 
   const TEST_ACCT = /\+(test|op)\d*@/i;
@@ -39,12 +42,16 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
     if (!t) return null;
     if (userId === t.client_id) t.me = 'client';
     else if (userId === operatorId) t.me = 'operator';
-    else if (await isAdmin(userId)) t.me = 'admin';
-    else return null;
+    else {
+      const level = await isAdmin(userId);
+      // A view-only login reads only conversations between two test accounts
+      if (level === 'admin' || (level === 'viewer' && TEST_ACCT.test(t.client_email || '') && TEST_ACCT.test(t.operator_email || ''))) t.me = 'admin';
+      else return null;
+    }
     const taking = ['open', 'test'].includes(t.job_status);
     if (!t.bid_id && !t.has_messages) {
       // Nothing here yet: only the operator can start it, with a question, on a job they can see
-      const canSee = t.job_status === 'open'
+      const canSee = (t.job_status === 'open' && !TEST_ACCT.test(t.operator_email || ''))
         || (t.job_status === 'test' && (TEST_ACCT.test(t.operator_email || '') || baseEmail(t.operator_email) === baseEmail(t.client_email)));
       if (t.me !== 'operator' || t.operator_role !== 'operator' || operatorId === t.client_id || !canSee) return null;
     }

@@ -71,7 +71,7 @@ module.exports = (pool, authMiddleware) => {
           [req.user.id]
         );
       } else {
-        // Operators see open jobs. Test operators (+test emails) also see test jobs so the full flow can be tried.
+        // Operators see open jobs. Test operators (+test / +op emails) see ONLY test jobs, so a test account can never bid on or message about a real customer's job.
         // Bid amounts stay sealed: operators only get the count and their own bid.
         const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
         const myEmail = (u.rows[0] && u.rows[0].email) || '';
@@ -88,7 +88,7 @@ module.exports = (pool, authMiddleware) => {
            LEFT JOIN bids mb ON mb.job_id = j.id AND mb.operator_id = $1
            LEFT JOIN job_location_shares sh ON sh.job_id = j.id AND sh.operator_id = $1
            LEFT JOIN users cu ON cu.id = j.client_id
-           WHERE j.client_id <> $1 AND (j.status = 'open'
+           WHERE j.client_id <> $1 AND ((j.status = 'open' AND NOT $2::boolean)
               OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')})))
            ORDER BY j.created_at DESC`,
           [req.user.id, isTest, myEmail]

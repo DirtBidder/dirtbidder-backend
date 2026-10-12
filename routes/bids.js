@@ -36,6 +36,10 @@ module.exports = (pool, authMiddleware) => {
         if (!/\+(test|op)\d*@/i.test(mine) && base(mine) !== base(j.client_email)) return res.status(404).json({ error: 'Job not found' });
       } else if (j.status !== 'open') {
         return res.status(400).json({ error: 'This job is no longer taking bids' });
+      } else {
+        // Real jobs: test accounts (+test / +op) can't bid, so a test bid never reaches a real customer
+        const u = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+        if (/\+(test|op)\d*@/i.test((u.rows[0] && u.rows[0].email) || '')) return res.status(404).json({ error: 'Job not found' });
       }
       const dup = await pool.query('SELECT id FROM bids WHERE job_id = $1 AND operator_id = $2', [req.params.jobId, req.user.id]);
       if (dup.rows.length) return res.status(400).json({ error: "You've already bid on this job" });

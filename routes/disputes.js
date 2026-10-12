@@ -1,5 +1,6 @@
 // Client disputes on escrowed jobs, operator responses, and DirtBidder admin decisions
 const express = require('express');
+const { TEST } = require('../lib/viewer');
 const router = express.Router();
 const crypto = require('crypto');
 const { stripeFor } = require('../lib/stripe');
@@ -127,8 +128,9 @@ module.exports = (pool, authMiddleware, adminOnly) => {
            FROM escrow_transactions e
            WHERE e.job_id = d.job_id AND e.status NOT IN ('pending_payment', 'cancelled', 'processing', 'failed')
              AND (e.id = d.escrow_id OR e.change_order_id IS NOT NULL)) t ON true
+         WHERE NOT $1::boolean OR (${TEST('cu')} AND (ou.id IS NULL OR ${TEST('ou')}))
          ORDER BY (d.status = 'open') DESC, d.created_at DESC
-         LIMIT 200`
+         LIMIT 200`, [!!req.user.viewer]
       );
       res.json(r.rows);
     } catch (err) {
@@ -150,7 +152,9 @@ module.exports = (pool, authMiddleware, adminOnly) => {
          FROM escrow_transactions e JOIN jobs j ON j.id = e.job_id
          JOIN users cu ON cu.id = j.client_id
          LEFT JOIN bids b ON b.id = e.bid_id LEFT JOIN users ou ON ou.id = b.operator_id
-         WHERE e.status = 'held' AND e.change_order_id IS NULL ORDER BY e.created_at DESC`);
+         WHERE e.status = 'held' AND e.change_order_id IS NULL
+           AND (NOT $1::boolean OR (${TEST('cu')} AND (ou.id IS NULL OR ${TEST('ou')})))
+         ORDER BY e.created_at DESC`, [!!req.user.viewer]);
       res.json(r.rows);
     } catch (err) {
       console.error(err);
