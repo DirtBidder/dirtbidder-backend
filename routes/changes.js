@@ -165,8 +165,11 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
       const committed = (await jobInfo(co.job_id)).committed;
       const fee = extraFee(committed, Number(co.amount));
       const amount = Number(co.amount);
-      await pool.query('UPDATE change_orders SET client_fee = $1, operator_fee = $1, client_total = $2, operator_payout = $3 WHERE id = $4',
-        [fee, round2(amount + fee), round2(amount - fee), co.id]);
+      // Operator's fee waived on this job ("bring a customer" promo): the client's fee still applies
+      const waived = (await pool.query('SELECT COALESCE(no_operator_fee, false) AS w FROM jobs WHERE id = $1', [co.job_id])).rows[0].w;
+      const opFee = waived ? 0 : fee;
+      await pool.query('UPDATE change_orders SET client_fee = $1, operator_fee = $4, client_total = $2, operator_payout = $3 WHERE id = $5',
+        [fee, round2(amount + fee), round2(amount - opFee), opFee, co.id]);
 
       if (!stripe) {
         // No Stripe at all (local testing): approve without a payment
@@ -177,8 +180,8 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
       await pool.query("UPDATE escrow_transactions SET status = 'cancelled' WHERE change_order_id = $1 AND status = 'pending_payment'", [co.id]);
       const esc = await pool.query(
         `INSERT INTO escrow_transactions (job_id, bid_id, change_order_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode)
-         VALUES ($1, $2, $3, $4, $5, $5, $6, $7, 'pending_payment', $8) RETURNING id`,
-        [co.job_id, co.bid_id, co.id, amount, fee, round2(amount + fee), round2(amount - fee), testJob]);
+         VALUES ($1, $2, $3, $4, $5, $9, $6, $7, 'pending_payment', $8) RETURNING id`,
+        [co.job_id, co.bid_id, co.id, amount, fee, round2(amount + fee), round2(amount - opFee), testJob, opFee]);
       const session = await (async () => { try { return await createCheckout(stripe, {
         mode: 'payment',
         line_items: [

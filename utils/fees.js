@@ -19,10 +19,12 @@ function feePerSide(amount) {
 }
 
 // Client pays job + fee; operator receives job - fee; DirtBidder keeps both fees.
-function breakdown(amount) {
+// noOperatorFee: the owner waived the operator's side on this job ("bring a customer" promo); the client's fee is unchanged.
+function breakdown(amount, { noOperatorFee = false } = {}) {
   const a = Number(amount) || 0;
   const fee = feePerSide(a);
-  return { job_amount: a, client_fee: fee, operator_fee: fee, client_total: a + fee, operator_payout: a - fee, platform_revenue: fee * 2 };
+  const opFee = noOperatorFee ? 0 : fee;
+  return { job_amount: a, client_fee: fee, operator_fee: opFee, client_total: a + fee, operator_payout: a - opFee, platform_revenue: fee + opFee };
 }
 
 module.exports = { BRACKETS, feePerSide, breakdown };

@@ -175,8 +175,8 @@ module.exports = (pool, authMiddleware) => {
       }
 
       // Escrow: client pays job + client fee through Stripe Checkout. The hire happens once payment is confirmed.
-      const f = breakdown(bid.amount);
-      const job = await pool.query('SELECT title FROM jobs WHERE id = $1', [bid.job_id]);
+      const job = await pool.query('SELECT title, COALESCE(no_operator_fee, false) AS no_op_fee FROM jobs WHERE id = $1', [bid.job_id]);
+      const f = breakdown(bid.amount, { noOperatorFee: !!(job.rows[0] && job.rows[0].no_op_fee) });
       const title = (job.rows[0] && job.rows[0].title) || 'DirtBidder job';
       const esc = await pool.query(
         `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode)

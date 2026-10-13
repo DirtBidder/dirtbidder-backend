@@ -367,6 +367,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
       const r = await pool.query(
         `SELECT b.id, b.amount, b.status, b.message, b.est_days, b.equipment, b.created_at,
                 j.id AS job_id, j.title AS job_title, j.status AS job_status, j.location AS job_location, j.budget AS job_budget,
+                COALESCE(j.no_operator_fee, false) AS no_operator_fee, j.no_operator_fee_note,
                 o.id AS operator_id, o.name AS operator_name, o.company_name AS operator_company, o.email AS operator_email,
                 o.suspended_at AS operator_suspended,
                 c.id AS client_id, c.name AS client_name, c.email AS client_email,
@@ -386,6 +387,30 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         `SELECT b.status, COUNT(*)::int AS n FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users o ON o.id = b.operator_id LEFT JOIN users c ON c.id = j.client_id
          WHERE NOT $1::boolean OR (${TEST('o')} AND ${TEST('c')}) GROUP BY b.status`, [!!req.user.viewer]);
       res.json({ bids: r.rows, counts: Object.fromEntries(counts.rows.map(c => [c.status || 'pending', c.n])) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // "Bring a customer" promo: switch the OPERATOR's fee off (or back on) for one job. The client's fee is unchanged.
+  // Also fixes any payment on the job that hasn't been paid out yet, so the operator gets the full job amount.
+  router.post('/jobs/:id/no-operator-fee', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const on = req.body.on !== false;
+      const note = String(req.body.note || '').trim().slice(0, 300) || null;
+      const j = await pool.query('UPDATE jobs SET no_operator_fee = $1, no_operator_fee_note = $2 WHERE id = $3 RETURNING id, title', [on, on ? note : null, id]);
+      if (!j.rows.length) return res.status(404).json({ error: 'Job not found' });
+      const OPEN = "('pending_payment', 'processing', 'held', 'disputed')";
+      const e = await pool.query(on
+        ? `UPDATE escrow_transactions SET operator_fee = 0, operator_payout = amount WHERE job_id = $1 AND status IN ${OPEN} RETURNING id`
+        : `UPDATE escrow_transactions SET operator_fee = client_fee, operator_payout = amount - client_fee WHERE job_id = $1 AND status IN ${OPEN} RETURNING id`, [id]);
+      await pool.query(on
+        ? "UPDATE change_orders SET operator_fee = 0, operator_payout = amount WHERE job_id = $1 AND status IN ('pending', 'paying')"
+        : "UPDATE change_orders SET operator_fee = client_fee, operator_payout = amount - client_fee WHERE job_id = $1 AND status IN ('pending', 'paying') AND client_fee IS NOT NULL", [id]);
+      console.log('[admin] operator fee', on ? 'WAIVED' : 'restored', 'on job', id, 'by', req.user.id, note ? '(' + note + ')' : '', '- payments updated:', e.rowCount);
+      res.json({ ok: true, on, payments_updated: e.rowCount });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });

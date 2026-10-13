@@ -245,7 +245,8 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       const opAmt = Math.round(Number(operator_amount) * 100) / 100;
       if (!(opAmt > 0 && opAmt < jobAmount)) return res.status(400).json({ error: 'Operator amount must be between $0 and the job amount' });
       const refundAmt = Math.round((jobAmount - opAmt) * 100) / 100;
-      const opFeeTotal = feePerSide(opAmt);
+      const waived = (await pool.query('SELECT COALESCE(no_operator_fee, false) AS w FROM jobs WHERE id = $1', [d.job_id])).rows[0].w;
+      const opFeeTotal = waived ? 0 : feePerSide(opAmt); // operator's fee waived on this job ("bring a customer" promo)
       let left = opAmt, feeLeft = opFeeTotal;
       for (let i = 0; i < escrows.length; i++) {
         const e = escrows[i], amt = Number(e.amount);

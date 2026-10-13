@@ -588,6 +588,9 @@ async function runMigrations() {
         .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS internal BOOLEAN');
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_viewer BOOLEAN'); // view-only admin (lawyer)
+      // "Bring a customer" promo: the owner can switch off the OPERATOR's fee on a job (the client's fee stays)
+      await pool.query('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS no_operator_fee BOOLEAN');
+      await pool.query('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS no_operator_fee_note TEXT');
       const base = c => `lower(split_part(split_part(${c}, '@', 1), '+', 1) || '@' || split_part(${c}, '@', 2))`;
       const own = await pool.query(
         `UPDATE users u SET internal = true
