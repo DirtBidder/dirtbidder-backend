@@ -17,6 +17,14 @@ function parsePin(lat, lng) {
 }
 
 module.exports = (pool, authMiddleware) => {
+  // Paying in stages: the first stage that isn't paid yet (null when every stage is paid, or the job isn't paid in stages)
+  async function unpaidStage(jobId) {
+    const s = await require('../lib/stages').stagesFor(pool, jobId);
+    if (!s || s.plan !== 'stages') return null;
+    const u = s.stages.find(x => x.status === 'unpaid' || x.status === 'processing');
+    return u ? u.n : null;
+  }
+
   // Post a new job (client only)
   router.post('/', authMiddleware, async (req, res) => {
     try {
@@ -155,6 +163,8 @@ module.exports = (pool, authMiddleware) => {
       );
       if (r.rows.length === 0) return res.status(403).json({ error: 'You are not hired on this job' });
       if (r.rows[0].status !== 'in_progress') return res.status(400).json({ error: 'This job is not in progress' });
+      const unpaid = await unpaidStage(req.params.id);
+      if (unpaid) return res.status(400).json({ error: `Stage ${unpaid} hasn’t been paid yet. Don’t do that part of the work until the client pays it. You’ll get an email when they do.` });
       await pool.query("UPDATE jobs SET status = 'awaiting_release', completed_at = NOW() WHERE id = $1", [req.params.id]);
       require('../lib/notify').markedComplete(pool, req.params.id);
       res.json({ status: 'awaiting_release' });
@@ -171,6 +181,8 @@ module.exports = (pool, authMiddleware) => {
       if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
       if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
       if (!['in_progress', 'awaiting_release'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is not ready for release' });
+      const unpaid = await unpaidStage(req.params.id);
+      if (unpaid) return res.status(400).json({ error: `Stage ${unpaid} hasn’t been paid yet. Pay it first, or email support@dirtbidder.com if you want to end the job early.` });
       await releaseJob(pool, req.params.id);
       res.json({ status: 'completed' });
     } catch (err) {

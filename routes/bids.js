@@ -1,6 +1,7 @@
 const express = require('express');
 const { scanFields, addFlag } = require('../lib/flags');
 const router = express.Router();
+const stages = require('../lib/stages');
 const { stripeFor, FRONTEND_URL, isLive } = require('../lib/stripe');
 const { breakdown } = require('../utils/fees');
 const { createCheckout } = require('../lib/funding');
@@ -137,6 +138,21 @@ module.exports = (pool, authMiddleware) => {
   });
 
   // Accept a bid (only the client who posted the job)
+  // The ways the client can pay for this bid (shown before they hire): in full, or the amount of each stage
+  router.get('/:id/plans', authMiddleware, async (req, res) => {
+    try {
+      const r = await pool.query(
+        'SELECT b.amount, j.client_id, COALESCE(j.no_operator_fee, false) AS no_op FROM bids b JOIN jobs j ON j.id = b.job_id WHERE b.id = $1', [req.params.id]);
+      const b = r.rows[0];
+      if (!b) return res.status(404).json({ error: 'Bid not found' });
+      if (b.client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      res.json(stages.planOptions(b.amount, { noOperatorFee: b.no_op }));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   router.post('/:id/accept', authMiddleware, async (req, res) => {
     try {
       const r = await pool.query(
@@ -176,17 +192,28 @@ module.exports = (pool, authMiddleware) => {
 
       // Escrow: client pays job + client fee through Stripe Checkout. The hire happens once payment is confirmed.
       const job = await pool.query('SELECT title, COALESCE(no_operator_fee, false) AS no_op_fee FROM jobs WHERE id = $1', [bid.job_id]);
-      const f = breakdown(bid.amount, { noOperatorFee: !!(job.rows[0] && job.rows[0].no_op_fee) });
+      const noOp = !!(job.rows[0] && job.rows[0].no_op_fee);
+      // How the client wants to pay: everything now ('full'), everything now but released in stages ('full_staged'),
+      // or one stage at a time ('stages'). Small jobs are always paid in full.
+      let plan = stages.PLANS.includes(req.body && req.body.plan) ? req.body.plan : 'full';
+      if (Number(bid.amount) < stages.MIN_STAGED) plan = 'full';
+      const all = stages.stageAmounts(bid.amount, { noOperatorFee: noOp });
+      const f = plan === 'stages'
+        ? { job_amount: all[0].amount, client_fee: all[0].client_fee, operator_fee: all[0].operator_fee, client_total: all[0].client_total, operator_payout: all[0].operator_payout }
+        : breakdown(bid.amount, { noOperatorFee: noOp });
       const title = (job.rows[0] && job.rows[0].title) || 'DirtBidder job';
       const esc = await pool.query(
-        `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment', $8) RETURNING id`,
-        [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout, testJob]
+        `INSERT INTO escrow_transactions (job_id, bid_id, amount, client_fee, operator_fee, client_total, operator_payout, status, test_mode, pay_plan, stage_n, stage_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_payment', $8, $9, $10, $11) RETURNING id`,
+        [bid.job_id, bid.id, f.job_amount, f.client_fee, f.operator_fee, f.client_total, f.operator_payout, testJob, plan,
+         plan === 'stages' ? 1 : null, plan === 'stages' ? all.length : null]
       );
       const session = await (async () => { try { return await createCheckout(stripe, {
         mode: 'payment',
         line_items: [
-          { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.job_amount * 100), product_data: { name: title.slice(0, 250), description: 'Held in escrow until you release it' } } },
+          { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.job_amount * 100), product_data: {
+            name: (plan === 'stages' ? 'Stage 1 of ' + all.length + ': ' : '') + title.slice(0, 230),
+            description: plan === 'full_staged' ? 'Held until you release it, one stage at a time as the work gets done' : 'Held in escrow until you release it' } } },
           { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.client_fee * 100), product_data: { name: 'DirtBidder service fee' } } }
         ],
         metadata: { escrow_id: String(esc.rows[0].id), bid_id: String(bid.id), job_id: String(bid.job_id), client_id: String(req.user.id) },

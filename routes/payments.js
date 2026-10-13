@@ -61,6 +61,7 @@ module.exports = (pool, authMiddleware) => {
       const result = await pool.query(
         `SELECT e.id, e.job_id, e.amount, e.client_fee, e.operator_fee, e.client_total, e.operator_payout,
                 e.status, e.change_order_id, e.created_at, e.released_at, e.paid_out_at, (e.stripe_transfer_id IS NOT NULL) AS paid_out,
+                e.stage_n, e.stage_count, e.stage_done_at, j.pay_plan,
                 j.title AS job_title, j.status AS job_status
          FROM escrow_transactions e
          JOIN jobs j ON j.id = e.job_id
