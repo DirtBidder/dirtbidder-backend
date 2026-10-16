@@ -409,6 +409,8 @@ async function runMigrations() {
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timeline VARCHAR(100)",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'open'",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS budget DECIMAL(12,2)",
+      // Client switched off new bids for now (job stays up for them; operators who haven't bid stop seeing it)
+      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bids_paused BOOLEAN DEFAULT false",
       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS operator_id INTEGER REFERENCES users(id)",
       "ALTER TABLE bids ADD COLUMN IF NOT EXISTS amount DECIMAL(12,2)",

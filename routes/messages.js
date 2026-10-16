@@ -27,7 +27,7 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
   async function threadFor(userId, jobId, operatorId) {
     const r = await pool.query(
       `SELECT j.id AS job_id, j.title AS job_title, j.status AS job_status, j.client_id,
-              j.site_address, j.site_lat, j.site_lng,
+              j.site_address, j.site_lat, j.site_lng, COALESCE(j.bids_paused, false) AS bids_paused,
               (SELECT b.id FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_id,
               (SELECT b.status FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_status,
               (SELECT b.amount FROM bids b WHERE b.job_id = j.id AND b.operator_id = $2 ORDER BY b.id DESC LIMIT 1) AS bid_amount,
@@ -51,6 +51,8 @@ module.exports = (pool, authMiddleware, ADMIN_EMAILS) => {
     const taking = ['open', 'test'].includes(t.job_status);
     if (!t.bid_id && !t.has_messages) {
       // Nothing here yet: only the operator can start it, with a question, on a job they can see
+      // ...and not on a job whose client switched off new bids
+      if (t.bids_paused) return null;
       const canSee = (t.job_status === 'open' && !TEST_ACCT.test(t.operator_email || ''))
         || (t.job_status === 'test' && (TEST_ACCT.test(t.operator_email || '') || baseEmail(t.operator_email) === baseEmail(t.client_email)));
       if (t.me !== 'operator' || t.operator_role !== 'operator' || operatorId === t.client_id || !canSee) return null;

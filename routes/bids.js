@@ -23,7 +23,7 @@ module.exports = (pool, authMiddleware) => {
       const days = est_days ? parseInt(est_days, 10) : null;
 
       const job = await pool.query(
-        'SELECT j.client_id, j.status, cu.email AS client_email FROM jobs j LEFT JOIN users cu ON cu.id = j.client_id WHERE j.id = $1',
+        'SELECT j.client_id, j.status, j.bids_paused, cu.email AS client_email FROM jobs j LEFT JOIN users cu ON cu.id = j.client_id WHERE j.id = $1',
         [req.params.jobId]
       );
       if (job.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
@@ -44,6 +44,7 @@ module.exports = (pool, authMiddleware) => {
       }
       const dup = await pool.query('SELECT id FROM bids WHERE job_id = $1 AND operator_id = $2', [req.params.jobId, req.user.id]);
       if (dup.rows.length) return res.status(400).json({ error: "You've already bid on this job" });
+      if (j.bids_paused) return res.status(400).json({ error: 'This client is not taking new bids right now' });
 
       // Contact info is hidden until hire; attempts to take the job off DirtBidder are flagged for the admin
       const scan = scanFields({ message: message || null, equipment: equipment || null });

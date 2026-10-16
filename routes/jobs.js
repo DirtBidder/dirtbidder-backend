@@ -86,6 +86,7 @@ module.exports = (pool, authMiddleware) => {
         const isTest = /\+(test|op)\d*@/i.test(myEmail);
         result = await pool.query(
           `SELECT j.id, j.title, j.description, j.location, j.job_type, j.acreage, j.timeline, j.budget, j.status, j.created_at,
+             COALESCE(j.bids_paused, false) AS bids_paused,
              (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
              mb.id AS my_bid_id, mb.amount AS my_bid_amount, mb.status AS my_bid_status,
              CASE WHEN sh.job_id IS NOT NULL THEN j.site_address END AS shared_address,
@@ -98,6 +99,9 @@ module.exports = (pool, authMiddleware) => {
            LEFT JOIN users cu ON cu.id = j.client_id
            WHERE j.client_id <> $1 AND ((j.status = 'open' AND NOT $2::boolean)
               OR (j.status = 'test' AND ($2::boolean OR ${BASE_EMAIL('cu.email')} = ${BASE_EMAIL('$3')})))
+             -- Client switched off new bids: only operators already talking to them about it still see it
+             AND (NOT COALESCE(j.bids_paused, false) OR mb.id IS NOT NULL
+                  OR EXISTS (SELECT 1 FROM messages m WHERE m.job_id = j.id AND m.operator_id = $1))
            ORDER BY j.created_at DESC`,
           [req.user.id, isTest, myEmail]
         );
@@ -215,6 +219,23 @@ module.exports = (pool, authMiddleware) => {
       }
       if (declined.rows.length) checkClosePattern(pool, req.user.id).catch(e => console.error('pattern check:', e.message));
       res.json({ status: 'closed' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Client turns new bids off (or back on) without closing the job. Bids already in stay, and the client can still hire one.
+  // While it's off, operators who haven't bid or asked about it stop seeing the job, and new bids and new questions are blocked.
+  router.post('/:id/bids-paused', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id, status FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['open', 'test'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is no longer open.' });
+      const paused = req.body && req.body.paused === true;
+      await pool.query('UPDATE jobs SET bids_paused = $1 WHERE id = $2', [paused, req.params.id]);
+      res.json({ bids_paused: paused });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
