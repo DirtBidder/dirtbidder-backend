@@ -125,7 +125,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
   });
 
   // Suspend: signs them out, blocks sign-in, takes down their open jobs and pulls their pending bids.
-  // Records are kept (payments, taxes, disputes). Money already in escrow is NOT touched — handle it on the Paid Jobs / Disputes tabs.
+  // Records are kept (payments, taxes, disputes). Money already held is NOT touched — handle it on the Paid Jobs / Disputes tabs.
   router.post('/users/:id/suspend', authMiddleware, adminOnly, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
@@ -310,10 +310,10 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
           subject: 'Payments are open on DirtBidder — you can hire now',
           heading: ready.length ? 'You can hire your operator now' : 'Payments are open on DirtBidder',
           lines: [
-            `${first ? 'Hi ' + first + ', t' : 'T'}hanks for your patience. Our secure escrow payments are now live.`,
+            `${first ? 'Hi ' + first + ', t' : 'T'}hanks for your patience. Secure payments are now live.`,
             ...ready.map(x => `• "${x.title}": ${x.operator || 'your operator'}'s ${usd(x.amount)} bid is still waiting for you.`),
             ...(ready.length ? [] : ['The bid you picked earlier is no longer open, but you can post the job again or accept another bid any time.']),
-            'Your payment is held in escrow and only released when you say the job is done. Pay by bank account or card (jobs over $10,000 are paid by bank account).'
+            'Your payment is held and only released when you say the job is done. Pay by bank account or card (jobs over $10,000 are paid by bank account).'
           ],
           button: { label: ready.length ? 'Review Your Bids' : 'Open Dashboard', url: SITE + '/dirtbidder-client-dashboard.html' }
         });

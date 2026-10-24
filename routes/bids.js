@@ -178,7 +178,7 @@ module.exports = (pool, authMiddleware) => {
         if (added.rows.length) notify.paymentsWaitlist(pool, bid.id);
         return res.status(503).json({
           payments_paused: true,
-          error: "Payments open soon. We're finishing our secure escrow setup. Your job and this bid are saved — we'll email you as soon as you can hire."
+          error: "Payments open soon. We're finishing our secure payment setup. Your job and this bid are saved — we'll email you as soon as you can hire."
         });
       }
 
@@ -214,7 +214,7 @@ module.exports = (pool, authMiddleware) => {
         line_items: [
           { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.job_amount * 100), product_data: {
             name: (plan === 'stages' ? 'Stage 1 of ' + all.length + ': ' : '') + title.slice(0, 230),
-            description: plan === 'full_staged' ? 'Held until you release it, one stage at a time as the work gets done' : 'Held in escrow until you release it' } } },
+            description: plan === 'full_staged' ? 'Held until you release it, one stage at a time as the work gets done' : 'Held until you release it' } } },
           { quantity: 1, price_data: { currency: 'usd', unit_amount: Math.round(f.client_fee * 100), product_data: { name: 'DirtBidder service fee' } } }
         ],
         metadata: { escrow_id: String(esc.rows[0].id), bid_id: String(bid.id), job_id: String(bid.job_id), client_id: String(req.user.id) },
