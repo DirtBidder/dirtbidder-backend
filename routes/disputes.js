@@ -8,6 +8,7 @@ const { feePerSide } = require('../utils/fees');
 const { releaseJob, AUTO_RELEASE_HOURS } = require('../lib/release');
 const { payPendingPayouts } = require('../lib/payouts');
 const notify = require('../lib/notify');
+const { processingCost, refundCents } = require('../lib/processing');
 
 module.exports = (pool, authMiddleware, adminOnly) => {
   // Client reports a problem: freezes the escrow until DirtBidder decides
@@ -162,7 +163,8 @@ module.exports = (pool, authMiddleware, adminOnly) => {
     }
   });
 
-  // Admin: cancel a paid job both sides agreed to cancel — full refund to the client, fee included
+  // Admin: cancel a paid job both sides agreed to cancel. The client gets back the job and DirtBidder's fee,
+  // minus only the card/bank processing cost Stripe charged (Terms section 12). DirtBidder keeps none of its fee.
   router.post('/admin/escrows/:id/cancel', authMiddleware, adminOnly, async (req, res) => {
     try {
       const r = await pool.query('SELECT * FROM escrow_transactions WHERE id = $1', [req.params.id]);
@@ -176,11 +178,17 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       }
       let total = 0;
       for (const x of all) {
-        const refund = await stripeFor(!!x.test_mode).refunds.create(
-          { payment_intent: x.stripe_payment_intent_id, amount: Math.round(Number(x.client_total) * 100), metadata: { escrow_id: String(x.id), reason: 'cancelled_by_agreement' } },
-          { idempotencyKey: 'cancel-refund-' + x.id });
-        await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, x.id]);
-        total += Number(x.client_total);
+        const st = stripeFor(!!x.test_mode);
+        const cents = refundCents(x.client_total, await processingCost(st, x.stripe_payment_intent_id));
+        let refundId = null;
+        if (cents > 0) {
+          const refund = await st.refunds.create(
+            { payment_intent: x.stripe_payment_intent_id, amount: cents, metadata: { escrow_id: String(x.id), reason: 'cancelled_by_agreement' } },
+            { idempotencyKey: 'cancel-refund-' + x.id });
+          refundId = refund.id;
+        }
+        await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refundId, x.id]);
+        total += cents / 100;
       }
       await pool.query("UPDATE change_orders SET status = 'withdrawn', decided_at = NOW() WHERE job_id = $1 AND status IN ('pending', 'paying')", [e.job_id]);
       await pool.query("UPDATE jobs SET status = 'cancelled' WHERE id = $1", [e.job_id]);
@@ -223,18 +231,27 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       }
 
       if (resolution === 'refund') {
-        // Full refund of everything the client paid (job + change orders + client fees)
+        // Refund everything the client paid (job + change orders + client fees), minus the processing cost
+        // Stripe charged on each payment (Terms section 11)
+        let refunded = 0;
         for (const e of escrows) {
-          const refund = await stripeFor(!!e.test_mode).refunds.create(
-            { payment_intent: e.stripe_payment_intent_id, amount: Math.round(Number(e.client_total) * 100), metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
-            { idempotencyKey: 'dispute-refund-' + d.id + '-' + e.id }
-          );
-          await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refund.id, e.id]);
+          const st = stripeFor(!!e.test_mode);
+          const cents = refundCents(e.client_total, await processingCost(st, e.stripe_payment_intent_id));
+          let refundId = null;
+          if (cents > 0) {
+            const refund = await st.refunds.create(
+              { payment_intent: e.stripe_payment_intent_id, amount: cents, metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
+              { idempotencyKey: 'dispute-refund-' + d.id + '-' + e.id }
+            );
+            refundId = refund.id;
+          }
+          refunded += cents / 100;
+          await pool.query("UPDATE escrow_transactions SET status = 'refunded', stripe_refund_id = $1 WHERE id = $2", [refundId, e.id]);
         }
         await pool.query("UPDATE jobs SET status = 'cancelled' WHERE id = $1", [d.job_id]);
         await pool.query(
           "UPDATE disputes SET status = 'resolved', resolution = 'refund', refund_amount = $1, operator_amount = 0, admin_note = $2, resolved_at = NOW(), resolved_by = $3 WHERE id = $4",
-          [clientTotal, note || null, req.user.id, d.id]
+          [Math.round(refunded * 100) / 100, note || null, req.user.id, d.id]
         );
         notify.disputeResolved(pool, d.id);
         return res.json({ ok: true });
@@ -248,6 +265,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       const waived = (await pool.query('SELECT COALESCE(no_operator_fee, false) AS w FROM jobs WHERE id = $1', [d.job_id])).rows[0].w;
       const opFeeTotal = waived ? 0 : feePerSide(opAmt); // operator's fee waived on this job ("bring a customer" promo)
       let left = opAmt, feeLeft = opFeeTotal;
+      let splitRefunded = 0;
       for (let i = 0; i < escrows.length; i++) {
         const e = escrows[i], amt = Number(e.amount);
         const opPart = Math.round(Math.min(left, amt) * 100) / 100;
@@ -255,11 +273,18 @@ module.exports = (pool, authMiddleware, adminOnly) => {
         const refundPart = Math.round((amt - opPart) * 100) / 100;
         let refundId = null;
         if (refundPart > 0) {
-          const refund = await stripeFor(!!e.test_mode).refunds.create(
-            { payment_intent: e.stripe_payment_intent_id, amount: Math.round(refundPart * 100), metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
+          // The client also gets back DirtBidder's fee on the refunded part, minus that part's share of the
+          // processing cost Stripe charged (Terms section 11)
+          const st = stripeFor(!!e.test_mode);
+          const share = amt > 0 ? refundPart / amt : 1;
+          const feeBack = Math.round(Number(e.client_fee || 0) * share * 100) / 100;
+          const cents = refundCents(refundPart + feeBack, await processingCost(st, e.stripe_payment_intent_id), share);
+          const refund = cents <= 0 ? { id: null } : await st.refunds.create(
+            { payment_intent: e.stripe_payment_intent_id, amount: cents, metadata: { dispute_id: String(d.id), escrow_id: String(e.id) } },
             { idempotencyKey: 'dispute-split-' + d.id + '-' + e.id }
           );
           refundId = refund.id;
+          splitRefunded += cents / 100;
         }
         if (opPart > 0) {
           // Operator fee shared across payments in proportion to the operator's part (last one takes the rounding)
@@ -276,7 +301,7 @@ module.exports = (pool, authMiddleware, adminOnly) => {
       await pool.query("UPDATE jobs SET status = 'completed', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1", [d.job_id]);
       await pool.query(
         "UPDATE disputes SET status = 'resolved', resolution = 'split', refund_amount = $1, operator_amount = $2, admin_note = $3, resolved_at = NOW(), resolved_by = $4 WHERE id = $5",
-        [refundAmt, opAmt, note || null, req.user.id, d.id]
+        [Math.round(splitRefunded * 100) / 100, opAmt, note || null, req.user.id, d.id]
       );
       const op = await pool.query("SELECT operator_id FROM bids WHERE job_id = $1 AND status = 'accepted' LIMIT 1", [d.job_id]);
       if (op.rows[0]) await payPendingPayouts(pool, op.rows[0].operator_id);

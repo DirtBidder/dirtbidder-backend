@@ -16,8 +16,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Date of the Terms of Service / Privacy Policy users agree to at signup
-const TERMS_VERSION = '2026-10-06';
+// Effective date of the Terms of Service users agree to (Terms Version 1.0, written with Surge Business Law).
+// Changing this asks everyone to agree again on their next visit.
+const TERMS_VERSION = '2026-10-24';
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 
 // Signup
@@ -54,6 +55,8 @@ app.post('/api/signup', async (req, res) => {
 
     const user = result.rows[0];
     if (req.body.accepted_terms === true) pool.query('INSERT INTO terms_acceptances (user_id, version) VALUES ($1, $2)', [user.id, TERMS_VERSION]).catch(e => console.error('terms record:', e.message));
+    // Operators confirm on the sign-up form that lien notices and deadlines are their own job (kept with the date)
+    if (user.role === 'operator' && req.body.accepted_lien === true) pool.query('UPDATE users SET lien_ack_at = NOW() WHERE id = $1', [user.id]).catch(e => console.error('lien record:', e.message));
     notify.confirmEmail(pool, user.id, { welcome: true }); // welcome note + "confirm your email" link, so typos and fake addresses show up
     notify.newSignup(pool, user.id); // tell the owner
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -133,7 +136,7 @@ function ownerOnly(req, res, next) {
 // Current logged-in user
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack, terms_version, COALESCE(admin_viewer, false) AS is_viewer FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, role, name, phone, company_name, profile, (email_confirmed_at IS NOT NULL) AS email_confirmed, (rules_ack_at IS NOT NULL) AS rules_ack, (lien_ack_at IS NOT NULL) AS lien_ack, terms_version, COALESCE(admin_viewer, false) AS is_viewer FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     // Have they agreed to the Terms as they stand today? If not, the dashboard asks them to (once per version).
     result.rows[0].terms_current = result.rows[0].terms_version === TERMS_VERSION;
@@ -156,6 +159,18 @@ app.post('/api/me/terms', authMiddleware, async (req, res) => {
     const r = await pool.query('UPDATE users SET terms_accepted_at = NOW(), terms_version = $1 WHERE id = $2 AND terms_version IS DISTINCT FROM $1 RETURNING id', [TERMS_VERSION, req.user.id]);
     if (r.rows.length) await pool.query('INSERT INTO terms_acceptances (user_id, version) VALUES ($1, $2)', [req.user.id, TERMS_VERSION]);
     res.json({ terms_current: true, version: TERMS_VERSION });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Operator confirms that lien notices, registry postings and deadlines are their responsibility, not DirtBidder's. Kept with the date.
+app.post('/api/me/lien', authMiddleware, async (req, res) => {
+  try {
+    if (req.body.agree !== true) return res.status(400).json({ error: 'Tap “I understand” to continue.' });
+    await pool.query('UPDATE users SET lien_ack_at = NOW() WHERE id = $1 AND lien_ack_at IS NULL', [req.user.id]);
+    res.json({ lien_ack: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -570,6 +585,7 @@ async function runMigrations() {
     try {
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email_confirmed_at TIMESTAMP');
       await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS rules_ack_at TIMESTAMP'); // when they agreed to the house rule
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS lien_ack_at TIMESTAMP'); // when an operator confirmed lien deadlines are theirs
       // A dated record of every time someone agreed to the Terms, and which version (sign-up, and again after each update)
       await pool.query(`CREATE TABLE IF NOT EXISTS terms_acceptances (
         id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
