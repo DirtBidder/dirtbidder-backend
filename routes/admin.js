@@ -76,6 +76,35 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // Download operators as a CSV in the column format Meta uses for a Custom Audience (to build a lookalike).
+  // Leaves out test accounts, the owner's own accounts and suspended users. Not available to the view-only login.
+  router.get('/export/operators.csv', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      if (req.user.viewer) return res.status(403).json({ error: VIEW_ONLY_MSG });
+      const r = await pool.query(
+        `SELECT u.email, u.name, u.phone, u.profile->>'zip' AS zip FROM users u
+          WHERE u.role = 'operator' AND u.suspended_at IS NULL AND NOT COALESCE(u.internal, false)
+            AND u.email !~* '\\+(test|op)[0-9]*@'
+          ORDER BY u.created_at`);
+      const cell = v => { const t = String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').trim(); return /[",]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+      const lines = ['email,phone,fn,ln,zip,country'];
+      for (const u of r.rows) {
+        const parts = String(u.name || '').trim().split(/\s+/);
+        let ph = String(u.phone || '').replace(/\D/g, '');
+        if (ph.length === 10) ph = '1' + ph;
+        if (ph.length !== 11) ph = '';
+        const zip = String(u.zip || '').replace(/\D/g, '').slice(0, 5);
+        lines.push([u.email.toLowerCase().trim(), ph, parts[0] || '', parts.length > 1 ? parts[parts.length - 1] : '', zip.length === 5 ? zip : '', 'US'].map(cell).join(','));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="dirtbidder-operators-meta.csv"');
+      res.send(lines.join('\n') + '\n');
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Email a user the short "confirm your email" link (for people who signed up before confirmation existed, or who lost the email)
   const lastAdminConfirm = new Map(); // userId -> time of the last confirm link sent from the admin page
   router.post('/users/:id/send-confirm', authMiddleware, adminOnly, async (req, res) => {
