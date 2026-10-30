@@ -229,6 +229,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
           `WITH w AS (SELECT generate_series(date_trunc('week', NOW()) - INTERVAL '7 weeks', date_trunc('week', NOW()), INTERVAL '1 week') AS wk)
            SELECT to_char(w.wk, 'YYYY-MM-DD') AS week,
              (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND u.suspended_at IS NULL AND ${realUser('u')})::int AS signups,
+             (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND u.suspended_at IS NULL AND u.role = 'operator' AND ${realUser('u')})::int AS op_signups,
+             (SELECT COUNT(*) FROM users u WHERE date_trunc('week', u.created_at) = w.wk AND u.suspended_at IS NULL AND u.role = 'client' AND ${realUser('u')})::int AS client_signups,
              (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE date_trunc('week', j.created_at) = w.wk AND ${realJob('j', 'c')})::int AS jobs,
              (SELECT COUNT(*) FROM bids b JOIN jobs j ON j.id = b.job_id JOIN users c ON c.id = j.client_id JOIN users o ON o.id = b.operator_id
                 WHERE date_trunc('week', b.created_at) = w.wk AND ${realJob('j', 'c')} AND ${realUser('o')})::int AS bids,
@@ -258,6 +260,13 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
                   (SELECT COUNT(*) FROM jobs j JOIN users c ON c.id = j.client_id WHERE j.status = 'test' OR ${T('c')})::int AS jobs`)
       ]);
 
+      // Newest people, operators and clients listed separately on HQ
+      const newest = await pool.query(
+        `SELECT * FROM (
+           SELECT u.role, u.created_at AS at, COALESCE(NULLIF(u.company_name, ''), u.name, u.email) AS who, u.profile->>'zip' AS zip,
+                  ROW_NUMBER() OVER (PARTITION BY u.role ORDER BY u.created_at DESC) AS rn
+           FROM users u WHERE ${realUser('u')} AND u.suspended_at IS NULL AND u.role IN ('operator', 'client')
+         ) x WHERE rn <= 10 ORDER BY at DESC`, p).catch(() => ({ rows: [] }));
       const noVisitors = { today: 0, last_7d: 0, views_7d: 0, top_referrers: [], weekly: {} };
       const visitors = viewer ? noVisitors : await hq.visitorStats(pool).catch(() => noVisitors);
       weekly.rows.forEach(w => { w.visitors = visitors.weekly[w.week] || 0; });
@@ -273,6 +282,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
           clients: (byRole.client || {}).total || 0,
           operators: (byRole.operator || {}).total || 0,
           new_7d: users.rows.reduce((n, r) => n + r.new_7d, 0),
+          new_operators_7d: (byRole.operator || {}).new_7d || 0,
+          new_clients_7d: (byRole.client || {}).new_7d || 0,
           suspended: users.rows.reduce((n, r) => n + r.suspended, 0)
         },
         jobs: {
@@ -288,6 +299,10 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         open: open.rows[0],
         weekly: weekly.rows,
         activity: activity.rows,
+        newest: {
+          operators: newest.rows.filter(r => r.role === 'operator').map(({ at, who, zip }) => ({ at, who, zip })),
+          clients: newest.rows.filter(r => r.role === 'client').map(({ at, who, zip }) => ({ at, who, zip }))
+        },
         visitors,
         tasks: tasks.rows
       });
