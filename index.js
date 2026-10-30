@@ -335,6 +335,25 @@ const alertsOff = async (req, res) => {
     page('That link didn’t work', 'Log in and open Settings to turn new-job emails on or off.');
   }
 };
+// Unsubscribe from owner announcements (promotional emails) from the link in the email (signed, no login)
+const newsOff = async (req, res) => {
+  const page = (title, text) => res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DirtBidder</title></head>
+<body style="margin:0;background:#1C1410;color:#F2EDE6;font-family:Arial,Helvetica,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center">
+<div style="max-width:420px;padding:32px 24px;text-align:center"><div style="font-size:26px;font-weight:900;margin-bottom:18px"><span style="color:#E8892A">Dirt</span>Bidder</div>
+<h1 style="font-size:20px;margin:0 0 12px">${title}</h1><p style="color:#C4A882;line-height:1.5;margin:0">${text}</p></div></body></html>`);
+  try {
+    const d = jwt.verify(String(req.query.t || ''), JWT_SECRET);
+    if (d.news !== 'off') throw new Error('wrong link');
+    await pool.query("UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || '{\"announcements\": false}'::jsonb WHERE id = $1", [d.id]);
+    page('You’re unsubscribed', 'You won’t get DirtBidder announcements anymore. You’ll still get emails about your own account, jobs, bids and payments.');
+  } catch (err) {
+    res.status(400);
+    page('That link didn’t work', 'Reply to any DirtBidder email or write to support@dirtbidder.com and we’ll take you off the list.');
+  }
+};
+app.get('/api/announcements/unsubscribe', newsOff);
+app.post('/api/announcements/unsubscribe', newsOff);
+
 app.get('/api/alerts/unsubscribe', alertsOff);
 app.post('/api/alerts/unsubscribe', alertsOff);
 
