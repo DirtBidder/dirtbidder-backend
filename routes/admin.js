@@ -263,7 +263,7 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
       // Newest people, operators and clients listed separately on HQ
       const newest = await pool.query(
         `SELECT * FROM (
-           SELECT u.role, u.created_at AS at, COALESCE(NULLIF(u.company_name, ''), u.name, u.email) AS who, u.profile->>'zip' AS zip,
+           SELECT u.role, u.created_at AS at, COALESCE(NULLIF(u.company_name, ''), u.name, u.email) AS who, u.profile->>'zip' AS zip, COALESCE(NULLIF(u.profile->>'zipCity', ''), NULLIF(u.profile->>'city', '')) AS town,
                   ROW_NUMBER() OVER (PARTITION BY u.role ORDER BY u.created_at DESC) AS rn
            FROM users u WHERE ${realUser('u')} AND u.suspended_at IS NULL AND u.role IN ('operator', 'client')
          ) x WHERE rn <= 10 ORDER BY at DESC`, p).catch(() => ({ rows: [] }));
@@ -300,8 +300,8 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
         weekly: weekly.rows,
         activity: activity.rows,
         newest: {
-          operators: newest.rows.filter(r => r.role === 'operator').map(({ at, who, zip }) => ({ at, who, zip })),
-          clients: newest.rows.filter(r => r.role === 'client').map(({ at, who, zip }) => ({ at, who, zip }))
+          operators: newest.rows.filter(r => r.role === 'operator').map(({ at, who, zip, town }) => ({ at, who, zip, town })),
+          clients: newest.rows.filter(r => r.role === 'client').map(({ at, who, zip, town }) => ({ at, who, zip, town }))
         },
         visitors,
         tasks: tasks.rows

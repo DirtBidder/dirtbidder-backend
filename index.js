@@ -58,7 +58,7 @@ app.post('/api/signup', async (req, res) => {
     // Operators confirm on the sign-up form that lien notices and deadlines are their own job (kept with the date)
     if (user.role === 'operator' && req.body.accepted_lien === true) pool.query('UPDATE users SET lien_ack_at = NOW() WHERE id = $1', [user.id]).catch(e => console.error('lien record:', e.message));
     notify.confirmEmail(pool, user.id, { welcome: true }); // welcome note + "confirm your email" link, so typos and fake addresses show up
-    notify.newSignup(pool, user.id); // tell the owner
+    require('./lib/zipcity').fillUser(pool, user.id).finally(() => notify.newSignup(pool, user.id)); // look up their town, then tell the owner
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user });
   } catch (err) {
@@ -704,6 +704,7 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
   setInterval(tick, 15 * 60 * 1000);
   // One-time owner emails (each person gets each one once, ever)
   require('./lib/broadcasts').runPending(pool).catch(err => console.error('Broadcast error:', err.message));
+  require('./lib/zipcity').backfill(pool).catch(err => console.error('ZIP town backfill error:', err.message));
   // The lawyer's view-only and test logins (only if LAWYER_DEMO_PASSWORD is set in Railway)
   require('./lib/lawyerDemo').setup(pool).catch(err => console.error('Lawyer demo setup error:', err.message));
 });
