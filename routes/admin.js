@@ -323,6 +323,28 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
      JOIN bids b ON b.id = w.bid_id JOIN users o ON o.id = b.operator_id
      ORDER BY w.created_at DESC LIMIT 300`);
 
+  // HQ: the newest jobs with everything the client posted (view-only logins don't see names, emails or addresses)
+  router.get('/jobs/recent', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const viewer = !!req.user.viewer, withTest = req.query.test === '1';
+      const r = await pool.query(
+        `SELECT j.*, COALESCE(NULLIF(cu.company_name, ''), cu.name) AS client_name, cu.email AS client_email, cu.phone AS client_phone,
+           (SELECT COUNT(*) FROM bids b WHERE b.job_id = j.id)::int AS bid_count,
+           (SELECT COALESCE(json_agg(p.token ORDER BY p.id), '[]'::json) FROM job_photos p WHERE p.job_id = j.id AND p.kind = 'site') AS photos
+         FROM jobs j JOIN users cu ON cu.id = j.client_id
+         WHERE ($1::boolean OR (j.status <> 'test' AND cu.email !~* '\\+(test|op)[0-9]*@'))
+         ORDER BY j.created_at DESC LIMIT 30`, [withTest]);
+      const rows = r.rows.map(j => {
+        if (viewer) { delete j.client_email; delete j.client_phone; delete j.site_address; delete j.site_lat; delete j.site_lng; j.client_name = 'A client'; }
+        return j;
+      });
+      res.json({ jobs: rows });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   router.get('/waitlist', authMiddleware, adminOnly, async (req, res) => {
     try {
       const r = await waitlistRows();
