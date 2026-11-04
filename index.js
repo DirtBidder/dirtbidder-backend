@@ -377,6 +377,7 @@ app.use('/api/disputes', require('./routes/disputes')(pool, authMiddleware, admi
 app.use('/api/stages', require('./routes/stages')(pool, authMiddleware)); // paying / releasing a job in stages
 // Public bid board: county, city and Iowa DOT jobs, linked to the official notices (anyone can view; owner edits)
 app.use('/api/public-bids', require('./routes/publicBids')(pool, authMiddleware, adminOnly));
+app.use('/api/referrals', require('./routes/referrals')(pool, authMiddleware, adminOnly)); // partner quote requests (public form off until REFERRALS_ON=1)
 
 // Public photo URL (unguessable token) so <img> tags can load it without a login header
 app.get('/api/photos/:token', async (req, res) => {
@@ -686,7 +687,8 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
   .then(() => require('./lib/confirmReminders').migrate(pool).catch(err => console.error('Confirm reminder setup failed:', err.message)))
   .then(() => require('./routes/publicBids').migrate(pool).catch(err => console.error('Bid board setup failed:', err.message)))
   .then(() => require('./lib/replyReminders').migrate(pool).catch(err => console.error('Reply reminder setup failed:', err.message)))
-  .then(() => require('./lib/stages').migrate(pool).catch(err => console.error('Stage payments setup failed:', err.message))).then(() => {
+  .then(() => require('./lib/stages').migrate(pool).catch(err => console.error('Stage payments setup failed:', err.message)))
+  .then(() => require('./routes/referrals').migrate(pool).catch(err => console.error('Referrals setup failed:', err.message))).then(() => {
   // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours,
   // check bank payments that are still clearing, send the owner's morning report once a day (from 7am Central),
   // and remind people who signed up but never confirmed their email (2 days and 6 days after sign-up, daytime only)
