@@ -357,6 +357,23 @@ app.post('/api/announcements/unsubscribe', newsOff);
 app.get('/api/alerts/unsubscribe', alertsOff);
 app.post('/api/alerts/unsubscribe', alertsOff);
 
+// "Keep My Job Open" link from the 30-day check-in email (before /api/jobs so it isn't taken for a job id)
+app.get('/api/jobs/keep-open', async (req, res) => {
+  const page = (title, text) => res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DirtBidder</title></head>
+<body style="margin:0;background:#1C1410;color:#F2EDE6;font-family:Arial,Helvetica,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center">
+<div style="max-width:420px;padding:32px 24px;text-align:center"><div style="font-size:26px;font-weight:900;margin-bottom:18px"><span style="color:#E8892A">Dirt</span>Bidder</div>
+<h1 style="font-size:20px;margin:0 0 12px">${title}</h1><p style="color:#C4A882;line-height:1.5;margin:0 0 20px">${text}</p>
+<a href="https://www.dirtbidder.com/dirtbidder-client-dashboard.html" style="display:inline-block;background:#E8892A;color:#1C1410;font-weight:700;text-decoration:none;padding:12px 20px;border-radius:4px">Open My Jobs</a></div></body></html>`);
+  const esc = v => String(v || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  try {
+    const r = await require('./lib/jobCheckins').keepOpen(pool, req.query.t);
+    if (r.ok) return page('Your job stays open', `"${esc(r.title)}" is still up, and contractors can keep bidding. We’ll check in again in about a month.`);
+    page('This job is no longer open', r.status === 'closed' ? `"${esc(r.title)}" was already closed. You can post it again anytime from Post a Job.` : 'This job already has a hired operator or isn’t taking bids.');
+  } catch (err) {
+    res.status(400);
+    page('That link didn’t work', 'Open My Jobs to see your job, or write to support@dirtbidder.com and we’ll keep it open for you.');
+  }
+});
 app.use('/api/jobs', jobsRoutes(pool, authMiddleware));
 app.use('/api/bids', bidsRoutes(pool, authMiddleware));
 app.use('/api/dashboard', dashboardRoutes(pool, authMiddleware, ownerOnly));
@@ -688,7 +705,8 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
   .then(() => require('./routes/publicBids').migrate(pool).catch(err => console.error('Bid board setup failed:', err.message)))
   .then(() => require('./lib/replyReminders').migrate(pool).catch(err => console.error('Reply reminder setup failed:', err.message)))
   .then(() => require('./lib/stages').migrate(pool).catch(err => console.error('Stage payments setup failed:', err.message)))
-  .then(() => require('./routes/referrals').migrate(pool).catch(err => console.error('Referrals setup failed:', err.message))).then(() => {
+  .then(() => require('./routes/referrals').migrate(pool).catch(err => console.error('Referrals setup failed:', err.message)))
+  .then(() => require('./lib/jobCheckins').migrate(pool).catch(err => console.error('Job check-in setup failed:', err.message))).then(() => {
   // Every 15 minutes: pay out jobs the client didn't release or dispute within 72 hours,
   // check bank payments that are still clearing, send the owner's morning report once a day (from 7am Central),
   // and remind people who signed up but never confirmed their email (2 days and 6 days after sign-up, daytime only)
@@ -701,6 +719,7 @@ runMigrations().then(() => require('./lib/hq').migrate(pool))
     require('./lib/funding').checkProcessing(pool).catch(err => console.error('Bank payment check error:', err.message));
     require('./lib/confirmReminders').run(pool).catch(err => console.error('Confirm reminder error:', err.message));
     require('./lib/replyReminders').run(pool).catch(err => console.error('Reply reminder error:', err.message));
+    require('./lib/jobCheckins').run(pool).catch(err => console.error('Job check-in error:', err.message)); // 30-day 'still need it?' emails, auto-close 7 days later
   };
   tick();
   setInterval(tick, 15 * 60 * 1000);
