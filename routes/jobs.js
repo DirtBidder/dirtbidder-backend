@@ -268,6 +268,24 @@ module.exports = (pool, authMiddleware) => {
     }
   });
 
+  // Client changes or removes the budget on a job that's still open (null = "Open to bids")
+  router.put('/:id/budget', authMiddleware, async (req, res) => {
+    try {
+      const j = await pool.query('SELECT client_id, status FROM jobs WHERE id = $1', [req.params.id]);
+      if (j.rows.length === 0) return res.status(404).json({ error: 'Job not found' });
+      if (j.rows[0].client_id !== req.user.id) return res.status(403).json({ error: 'Not your job' });
+      if (!['open', 'test'].includes(j.rows[0].status)) return res.status(400).json({ error: 'This job is no longer open, so its budget can’t be changed.' });
+      const raw = req.body.budget;
+      const budget = raw === null || raw === '' || raw === undefined ? null : Math.round(Number(raw) * 100) / 100;
+      if (budget !== null && (!isFinite(budget) || budget <= 0 || budget > 10000000)) return res.status(400).json({ error: 'Enter a budget between $1 and $10,000,000, or leave it blank.' });
+      await pool.query('UPDATE jobs SET budget = $1 WHERE id = $2', [budget, req.params.id]);
+      res.json({ budget });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Client adds or changes the exact job-site address (private: only the hired operator ever sees it)
   router.put('/:id/address', authMiddleware, async (req, res) => {
     try {
