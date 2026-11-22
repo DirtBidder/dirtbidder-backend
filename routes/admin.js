@@ -136,6 +136,23 @@ module.exports = (pool, authMiddleware, adminOnly, ADMIN_EMAILS) => {
     }
   });
 
+  // Set a user's ZIP (their home base for job alerts and the town shown in HQ), then look up the town name.
+  // For when someone signs up without a ZIP and tells the owner where they are.
+  router.post('/users/:id/zip', authMiddleware, adminOnly, async (req, res) => {
+    try {
+      const zip = String(req.body.zip || '').replace(/\D/g, '').slice(0, 5);
+      if (zip.length !== 5) return res.status(400).json({ error: 'Enter a 5-digit ZIP.' });
+      const id = parseInt(req.params.id, 10);
+      const r = await pool.query("UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || jsonb_build_object('zip', $1::text, 'zipCity', '') WHERE id = $2 RETURNING id", [zip, id]);
+      if (!r.rows[0]) return res.status(404).json({ error: 'User not found' });
+      const town = await require('../lib/zipcity').fillUser(pool, id);
+      res.json({ id, zip, town });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Warning: emails the user the reason and keeps a record. Doesn't limit their account.
   router.post('/users/:id/warn', authMiddleware, adminOnly, async (req, res) => {
     try {
